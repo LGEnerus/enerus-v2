@@ -24,7 +24,19 @@ export default function LoginPage() {
     }
 
     if (data.session) {
-      window.location.replace('/dashboard')
+      // Check role and route accordingly
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: userData } = await (supabase as any)
+        .from('users')
+        .select('role')
+        .eq('id', data.user.id)
+        .single()
+
+      if (userData?.role === 'admin') {
+        window.location.replace('/admin')
+      } else {
+        window.location.replace('/dashboard')
+      }
     }
   }
 
@@ -42,9 +54,11 @@ export default function LoginPage() {
             <div className="text-xs text-gray-400 tracking-wide uppercase">MCS Umbrella Platform</div>
           </div>
         </div>
+
         <div className="bg-white border border-gray-200 rounded-xl p-8">
           <h1 className="text-lg font-medium text-gray-900 mb-1">Sign in</h1>
           <p className="text-sm text-gray-500 mb-6">Enter your credentials to access your account</p>
+
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Email address</label>
@@ -69,9 +83,7 @@ export default function LoginPage() {
               />
             </div>
             {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg px-3 py-2.5">
-                {error}
-              </div>
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg px-3 py-2.5">{error}</div>
             )}
             <button
               type="submit"
@@ -81,6 +93,7 @@ export default function LoginPage() {
               {loading ? 'Signing in...' : 'Sign in'}
             </button>
           </form>
+
           <p className="text-xs text-gray-400 text-center mt-6">
             New installer?{' '}
             <Link href="/register" className="text-emerald-700 hover:underline font-medium">
