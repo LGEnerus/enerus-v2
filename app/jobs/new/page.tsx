@@ -62,11 +62,9 @@ type HeatLoss = {
   ventilation_loss_w: number
   dhw_demand_w: number
   annual_kwh_heat: number
-  annual_kwh_total: number
   current_heating_cost: number
   current_hotwater_cost: number
-  current_lighting_cost: number
-  current_total_cost: number
+  current_relevant_cost: number
 }
 
 const emptyCustomer: CustomerData = {
@@ -92,45 +90,94 @@ function hasHeatPump(epc: EpcData): boolean {
 function calcHeatLoss(epc: EpcData): HeatLoss {
   const area = parseFloat(epc.total_floor_area) || 80
   const era = epc.construction_age_band || ''
+  const propType = (epc.property_type || '').toLowerCase()
+  const wallsDesc = (epc.walls_description || '').toLowerCase()
+  const roofDesc = (epc.roof_description || '').toLowerCase()
+  const windowsDesc = (epc.windows_description || '').toLowerCase()
 
-  let uWall = 0.45, uRoof = 0.25, uFloor = 0.35, uWindow = 1.8
-  if (era.includes('2000') || era.includes('2007') || era.includes('2012')) {
-    uWall = 0.28; uRoof = 0.16; uFloor = 0.22; uWindow = 1.4
-  } else if (era.includes('1991') || era.includes('1996')) {
-    uWall = 0.35; uRoof = 0.20; uFloor = 0.25; uWindow = 1.6
-  } else if (era.includes('1976') || era.includes('1983')) {
-    uWall = 0.55; uRoof = 0.30; uFloor = 0.40; uWindow = 2.6
-  } else if (era.includes('1967') || era.includes('1975')) {
-    uWall = 0.80; uRoof = 0.50; uFloor = 0.50; uWindow = 3.0
-  } else if (era.includes('before') || era.includes('1929') || era.includes('1949')) {
-    uWall = 1.3; uRoof = 0.7; uFloor = 0.6; uWindow = 4.5
-  }
+  // ── U-values: start with era defaults, then refine from EPC descriptions ──
 
-  const deltaT = 24
-  const wallArea = area * 1.6
-  const roofArea = area * 0.85
+  // Wall U-value
+  let uWall = 1.7 // pre-1920 solid uninsulated default
+  if (era.includes('2012') || era.includes('2007')) uWall = 0.18
+  else if (era.includes('2000') || era.includes('1996')) uWall = 0.27
+  else if (era.includes('1991') || era.includes('1983')) uWall = 0.35
+  else if (era.includes('1976') || era.includes('1967')) uWall = 0.60
+  else if (era.includes('1950') || era.includes('1966')) uWall = 1.0
+  else if (era.includes('1930') || era.includes('1949')) uWall = 1.7
+
+  // Override wall U-value from EPC description
+  if (wallsDesc.includes('cavity insulation') || wallsDesc.includes('filled cavity')) uWall = Math.min(uWall, 0.50)
+  else if (wallsDesc.includes('external insulation') || wallsDesc.includes('internal insulation')) uWall = Math.min(uWall, 0.30)
+  else if (wallsDesc.includes('cavity') && !wallsDesc.includes('insulation')) uWall = Math.min(uWall, 1.6)
+
+  // Roof U-value
+  let uRoof = 0.60
+  if (roofDesc.includes('200mm') || roofDesc.includes('300mm') || roofDesc.includes('well insulated')) uRoof = 0.13
+  else if (roofDesc.includes('100mm') || roofDesc.includes('150mm') || roofDesc.includes('insulated')) uRoof = 0.22
+  else if (roofDesc.includes('no insulation') || roofDesc.includes('uninsulated')) uRoof = 2.0
+  else if (era.includes('2000') || era.includes('2007') || era.includes('2012')) uRoof = 0.16
+  else if (era.includes('1991') || era.includes('1996')) uRoof = 0.20
+
+  // Window U-value
+  let uWindow = 4.8
+  if (windowsDesc.includes('triple')) uWindow = 0.8
+  else if (windowsDesc.includes('double') && windowsDesc.includes('low-e')) uWindow = 1.4
+  else if (windowsDesc.includes('double')) uWindow = 2.0
+  else if (windowsDesc.includes('secondary')) uWindow = 2.4
+  // single glazing stays at 4.8
+
+  // Floor U-value — less variation, era-based
+  let uFloor = 0.45
+  if (era.includes('2000') || era.includes('2007') || era.includes('2012')) uFloor = 0.18
+  else if (era.includes('1991') || era.includes('1996')) uFloor = 0.22
+  else if (era.includes('1983') || era.includes('1976')) uFloor = 0.35
+
+  // ── Element areas from floor area and property type ──
+  // These ratios are based on SAP/MCS guidance for typical UK properties
+  let heightFactor = 2.5
+  if (propType.includes('flat') || propType.includes('maisonette')) heightFactor = 2.4
+
+  // Exposed wall area: perimeter estimate from floor area
+  // Typical semi-detached: 3 exposed faces; detached: 4; terrace: 2; flat: varies
+  let exposedWallFactor = 1.4
+  if (propType.includes('detached')) exposedWallFactor = 1.8
+  else if (propType.includes('semi')) exposedWallFactor = 1.4
+  else if (propType.includes('terrace') || propType.includes('mid-terrace')) exposedWallFactor = 1.0
+  else if (propType.includes('end-terrace') || propType.includes('end terrace')) exposedWallFactor = 1.3
+  else if (propType.includes('flat')) exposedWallFactor = 0.9
+
+  const wallArea = area * exposedWallFactor * heightFactor * 0.75 // subtract 25% for windows/doors
+  const roofArea = propType.includes('flat') ? 0 : area * 1.05
   const floorArea = area
-  const windowArea = area * 0.20
-  const doorArea = area * 0.03
+  const windowArea = area * 0.15 // ~15% of floor area — typical UK
+  const doorArea = 3.6 // standard 1.8m x 2.0m x 1 door exposed
 
+  // ── Fabric heat loss ──
+  const designDeltaT = 24 // indoor 21°C, outdoor -3°C
   const fabricLoss = Math.round(
     (uWall * wallArea + uRoof * roofArea + uFloor * floorArea +
-     uWindow * windowArea + 1.0 * doorArea) * deltaT
+     uWindow * windowArea + 2.0 * doorArea) * designDeltaT
   )
-  const ventLoss = Math.round(area * 2.4 * 0.5 * 0.33 * deltaT)
-  const dhwDemand = Math.round(area * 7.5)
+
+  // ── Ventilation loss ── (SAP method: 0.33 × volume × ACH × deltaT)
+  const volume = area * heightFactor
+  const ach = propType.includes('flat') ? 0.5 : 0.6
+  const ventLoss = Math.round(0.33 * volume * ach * designDeltaT)
+
+  // ── DHW demand ── (MCS method: 40 litres/person/day, 2.3 people avg, 45°C rise)
+  const dhwDemand = Math.round((40 * 2.3 * 4.18 * 45) / (3600 * 8) * 1000) // ~600–700W typical
+
   const totalLoad = fabricLoss + ventLoss + dhwDemand
   const recommendedKw = Math.ceil(totalLoad / 1000)
 
-  // Annual energy from EPC or estimate
-  const annualKwhHeat = Math.round(area * 85)
-  const annualKwhTotal = parseInt(epc.energy_consumption_current) || Math.round(area * 140)
+  // ── Annual energy from EPC or estimate ──
+  const annualKwhHeat = parseInt(epc.energy_consumption_current) || Math.round(area * 110)
 
-  // Use actual EPC costs where available
-  const heatingCost = parseInt(epc.heating_cost_current) || Math.round(annualKwhHeat * 0.07)
-  const hotWaterCost = parseInt(epc.hot_water_cost_current) || Math.round(area * 1.8)
-  const lightingCost = parseInt(epc.lighting_cost_current) || Math.round(area * 0.9)
-  const totalCost = parseInt(epc.energy_cost_current) || (heatingCost + hotWaterCost + lightingCost)
+  // Relevant costs: heating + hot water only (no lighting)
+  const heatingCost = parseInt(epc.heating_cost_current) || Math.round(area * 8)
+  const hotWaterCost = parseInt(epc.hot_water_cost_current) || Math.round(area * 2.5)
+  const relevantCost = heatingCost + hotWaterCost
 
   return {
     design_load_w: totalLoad,
@@ -139,11 +186,9 @@ function calcHeatLoss(epc: EpcData): HeatLoss {
     ventilation_loss_w: ventLoss,
     dhw_demand_w: dhwDemand,
     annual_kwh_heat: annualKwhHeat,
-    annual_kwh_total: annualKwhTotal,
     current_heating_cost: heatingCost,
     current_hotwater_cost: hotWaterCost,
-    current_lighting_cost: lightingCost,
-    current_total_cost: totalCost,
+    current_relevant_cost: relevantCost,
   }
 }
 
@@ -156,13 +201,10 @@ export default function NewJobPage() {
   const [epcLoading, setEpcLoading] = useState(false)
   const [epcError, setEpcError] = useState('')
   const [showEpcList, setShowEpcList] = useState(false)
-
-  // BUS step
   const [claimBus, setClaimBus] = useState<boolean | null>(null)
   const [busEligible, setBusEligible] = useState(false)
   const [busReason, setBusReason] = useState('')
   const [heatPumpDetected, setHeatPumpDetected] = useState(false)
-
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -170,7 +212,6 @@ export default function NewJobPage() {
     setCustomer(prev => ({ ...prev, [field]: value }))
   }
 
-  // Auto-search EPC when postcode is entered and user moves to step 2
   useEffect(() => {
     if (step === 2 && customer.postcode && epcResults.length === 0 && !epcLoading) {
       searchEpc(customer.postcode)
@@ -186,10 +227,7 @@ export default function NewJobPage() {
       if (data.rows && data.rows.length > 0) {
         setEpcResults(data.rows)
         setShowEpcList(true)
-        // Auto-select if only one result
-        if (data.rows.length === 1) {
-          handleSelectEpc(data.rows[0])
-        }
+        if (data.rows.length === 1) handleSelectEpc(data.rows[0])
       } else {
         setEpcError('No EPC records found for this postcode.')
       }
@@ -206,7 +244,6 @@ export default function NewJobPage() {
     setHeatLoss(hl)
     const hp = hasHeatPump(epc)
     setHeatPumpDetected(hp)
-    // EPC exists + no heat pump = eligible
     setBusEligible(!hp)
     setBusReason(hp
       ? 'A heat pump appears to already be installed — BUS cannot be claimed'
@@ -257,7 +294,7 @@ export default function NewJobPage() {
           epc_rating: selectedEpc?.current_energy_rating || null,
           bus_eligible: claimBus && busEligible,
           bus_checked_at: new Date().toISOString(),
-          notes: selectedEpc ? `EPC: ${selectedEpc.lmk_key}` : null,
+          notes: selectedEpc ? `EPC Certificate Number: ${selectedEpc.lmk_key}` : null,
         })
         .select()
         .single()
@@ -303,7 +340,6 @@ export default function NewJobPage() {
           })
       }
 
-      // Send BUS notification to admin if claiming
       if (claimBus && busEligible) {
         await (supabase as any)
           .from('audit_log')
@@ -315,7 +351,7 @@ export default function NewJobPage() {
             entity_type: 'job',
             entity_id: newJob.id,
             description: `BUS application requested for ${customer.first_name} ${customer.last_name} — £7,500 grant`,
-            metadata: { bus_grant: 7500, epc_rating: selectedEpc?.current_energy_rating },
+            metadata: { bus_grant: 7500, epc_rating: selectedEpc?.current_energy_rating, epc_cert: selectedEpc?.lmk_key },
           })
       }
 
@@ -454,10 +490,9 @@ export default function NewJobPage() {
           </div>
         )}
 
-        {/* STEP 2 — Property & EPC (auto-loaded) */}
+        {/* STEP 2 — Property & EPC */}
         {step === 2 && (
           <div className="space-y-4">
-            {/* EPC loading state */}
             {epcLoading && (
               <div className="bg-white border border-gray-200 rounded-xl p-6 flex items-center gap-3">
                 <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin flex-shrink-0"/>
@@ -465,21 +500,14 @@ export default function NewJobPage() {
               </div>
             )}
 
-            {/* EPC error */}
             {epcError && !epcLoading && (
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
                 <div className="text-sm font-medium text-amber-900 mb-1">EPC not found</div>
-                <div className="text-xs text-amber-700">{epcError} You can continue — property details will be collected at survey stage.</div>
-                <button
-                  onClick={() => searchEpc(customer.postcode)}
-                  className="mt-3 text-xs text-amber-800 underline"
-                >
-                  Try again
-                </button>
+                <div className="text-xs text-amber-700 mb-2">{epcError} You can continue — property details will be collected at survey stage.</div>
+                <button onClick={() => searchEpc(customer.postcode)} className="text-xs text-amber-800 underline">Try again</button>
               </div>
             )}
 
-            {/* EPC list — multiple results */}
             {showEpcList && epcResults.length > 1 && (
               <div className="bg-white border border-gray-200 rounded-xl p-6">
                 <div className="text-sm font-medium text-gray-900 mb-1">Select the correct property</div>
@@ -509,22 +537,16 @@ export default function NewJobPage() {
               </div>
             )}
 
-            {/* Property details — EPC selected */}
             {selectedEpc && !showEpcList && (
               <>
                 <div className="bg-white border border-gray-200 rounded-xl p-6">
                   <div className="flex items-center justify-between mb-4">
                     <div className="text-sm font-medium text-gray-900">Property details</div>
-                    <button
-                      onClick={() => setShowEpcList(true)}
-                      className="text-xs text-emerald-700 hover:underline"
-                    >
-                      Change property
-                    </button>
+                    <button onClick={() => setShowEpcList(true)} className="text-xs text-emerald-700 hover:underline">Change property</button>
                   </div>
-                  <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-3 mb-4">
                     {[
-                      { label: 'Address', value: [selectedEpc.address1, selectedEpc.address2, selectedEpc.address3].filter(Boolean).join(', ') },
+                      { label: 'Address', value: [selectedEpc.address1, selectedEpc.address2, selectedEpc.address3].filter(Boolean).join(', '), full: true },
                       { label: 'Postcode', value: selectedEpc.postcode },
                       { label: 'Property type', value: selectedEpc.property_type },
                       { label: 'Built form', value: selectedEpc.built_form },
@@ -532,26 +554,44 @@ export default function NewJobPage() {
                       { label: 'Floor area', value: selectedEpc.total_floor_area ? `${selectedEpc.total_floor_area} m²` : '—' },
                       { label: 'EPC rating (current)', value: selectedEpc.current_energy_rating },
                       { label: 'EPC rating (potential)', value: selectedEpc.potential_energy_rating },
-                      { label: 'Main heating', value: selectedEpc.mainheat_description },
-                      { label: 'Heating controls', value: selectedEpc.mainheatc_description },
-                      { label: 'Hot water', value: selectedEpc.hot_water_description },
+                      { label: 'Main heating', value: selectedEpc.mainheat_description, full: true },
+                      { label: 'Hot water', value: selectedEpc.hot_water_description, full: true },
                       { label: 'Main fuel', value: selectedEpc.main_fuel },
-                      { label: 'Walls', value: selectedEpc.walls_description },
-                      { label: 'Roof', value: selectedEpc.roof_description },
-                      { label: 'Windows', value: selectedEpc.windows_description },
                       { label: 'Habitable rooms', value: selectedEpc.number_habitable_rooms },
+                      { label: 'Walls', value: selectedEpc.walls_description, full: true },
+                      { label: 'Roof', value: selectedEpc.roof_description, full: true },
+                      { label: 'Windows', value: selectedEpc.windows_description, full: true },
                     ].map(row => (
-                      <div key={row.label} className="col-span-1">
+                      <div key={row.label} className={row.full ? 'col-span-2' : 'col-span-1'}>
                         <div className="text-xs text-gray-400">{row.label}</div>
                         <div className="text-xs font-medium text-gray-900 mt-0.5">{row.value || '—'}</div>
                       </div>
                     ))}
                   </div>
-                  <div className="mt-4 pt-4 border-t border-gray-100">
-                    <div className="text-xs text-gray-400">EPC certificate reference</div>
-                    <div className="text-xs font-mono text-gray-600 mt-0.5">{selectedEpc.lmk_key}</div>
+
+                  {/* EPC Certificate Number — prominent */}
+                  <div className="border-t border-gray-100 pt-4">
+                    <div className="text-xs font-medium text-gray-500 mb-1">EPC Certificate Number</div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-xs font-mono bg-gray-50 border border-gray-200 rounded px-3 py-2 flex-1 text-gray-800 break-all">
+                        {selectedEpc.lmk_key}
+                      </div>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(selectedEpc.lmk_key)}
+                        className="text-xs text-emerald-700 hover:underline flex-shrink-0 px-2 py-2"
+                      >
+                        Copy
+                      </button>
+                    </div>
                     <div className="text-xs text-gray-400 mt-1">Inspection date: {selectedEpc.inspection_date}</div>
                   </div>
+
+                  {heatPumpDetected && (
+                    <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+                      <div className="text-xs font-medium text-amber-800">Heat pump detected in EPC</div>
+                      <div className="text-xs text-amber-700 mt-0.5">The EPC indicates a heat pump may already be installed. Please verify on site.</div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Heat loss */}
@@ -587,46 +627,34 @@ export default function NewJobPage() {
                       </div>
                     </div>
 
-                    {/* Current energy costs from EPC */}
+                    {/* Current energy costs — heating & hot water only */}
                     <div className="bg-gray-50 rounded-xl p-4">
-                      <div className="text-xs font-medium text-gray-700 mb-3">Current estimated annual energy costs (from EPC)</div>
+                      <div className="text-xs font-medium text-gray-700 mb-3">Current estimated annual energy costs (heating & hot water)</div>
                       <div className="space-y-2 text-xs">
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Heating</span>
+                          <span className="text-gray-500">Space heating</span>
                           <span className="font-medium">£{heatLoss.current_heating_cost.toLocaleString()}/yr</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Hot water</span>
                           <span className="font-medium">£{heatLoss.current_hotwater_cost.toLocaleString()}/yr</span>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Lighting</span>
-                          <span className="font-medium">£{heatLoss.current_lighting_cost.toLocaleString()}/yr</span>
-                        </div>
                         <div className="flex justify-between pt-2 border-t border-gray-200 font-medium">
-                          <span className="text-gray-900">Total energy spend</span>
-                          <span className="text-gray-900">£{heatLoss.current_total_cost.toLocaleString()}/yr</span>
+                          <span className="text-gray-900">Total relevant spend</span>
+                          <span className="text-gray-900">£{heatLoss.current_relevant_cost.toLocaleString()}/yr</span>
                         </div>
                         <div className="flex justify-between pt-1">
-                          <span className="text-gray-500">Annual energy use</span>
-                          <span className="font-medium">{heatLoss.annual_kwh_total.toLocaleString()} kWh/yr</span>
+                          <span className="text-gray-500">Annual energy consumption</span>
+                          <span className="font-medium">{heatLoss.annual_kwh_heat.toLocaleString()} kWh/yr</span>
                         </div>
                       </div>
-                      <p className="text-xs text-gray-400 mt-3">Full running cost comparison will be completed at design stage once the system specification is confirmed.</p>
+                      <p className="text-xs text-gray-400 mt-3">Based on EPC data. Full running cost comparison completed at design stage once system is specified.</p>
                     </div>
-
-                    {heatPumpDetected && (
-                      <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
-                        <div className="text-xs font-medium text-amber-800">Heat pump detected in EPC</div>
-                        <div className="text-xs text-amber-700 mt-0.5">The EPC indicates a heat pump may already be installed. Please verify on site — this may affect BUS eligibility.</div>
-                      </div>
-                    )}
                   </div>
                 )}
               </>
             )}
 
-            {/* No EPC — manual note */}
             {!selectedEpc && !epcLoading && !showEpcList && (
               <div className="bg-white border border-gray-200 rounded-xl p-6">
                 <div className="text-sm font-medium text-gray-900 mb-1">No EPC data</div>
@@ -653,7 +681,6 @@ export default function NewJobPage() {
               <div className="text-sm font-medium text-gray-900 mb-1">Boiler Upgrade Scheme (BUS)</div>
               <div className="text-xs text-gray-500 mb-6">The BUS grant provides £7,500 towards the cost of an air-to-water heat pump installation, claimed on the customer&apos;s behalf.</div>
 
-              {/* Eligibility status */}
               <div className={`rounded-xl p-4 mb-6 border ${busEligible ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
                 <div className="flex items-start gap-3">
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${busEligible ? 'bg-emerald-100' : 'bg-amber-100'}`}>
@@ -662,44 +689,39 @@ export default function NewJobPage() {
                         <path d="M1 5l3.5 3.5 6.5-8" stroke="#065f46" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                       </svg>
                     ) : (
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                        <path d="M6 1v6M6 9.5v.5" stroke="#92400e" strokeWidth="2" strokeLinecap="round"/>
+                      <svg width="4" height="10" viewBox="0 0 4 10" fill="none">
+                        <path d="M2 1v6M2 9v1" stroke="#92400e" strokeWidth="2" strokeLinecap="round"/>
                       </svg>
                     )}
                   </div>
                   <div>
                     <div className={`text-sm font-medium ${busEligible ? 'text-emerald-900' : 'text-amber-900'}`}>
-                      {busEligible ? 'BUS eligible — £7,500 grant available' : 'BUS eligibility to confirm'}
+                      {busEligible ? 'BUS eligible — £7,500 grant available' : 'BUS eligibility to confirm on site'}
                     </div>
                     <div className={`text-xs mt-1 ${busEligible ? 'text-emerald-700' : 'text-amber-700'}`}>{busReason}</div>
                   </div>
                 </div>
               </div>
 
-              {/* Toggle */}
               <div className="text-sm font-medium text-gray-900 mb-3">Will you be claiming the BUS grant for this customer?</div>
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={() => setClaimBus(true)}
                   className={`p-4 rounded-xl border-2 text-left transition-colors ${
-                    claimBus === true
-                      ? 'border-emerald-600 bg-emerald-50'
-                      : 'border-gray-200 hover:border-emerald-300'
+                    claimBus === true ? 'border-emerald-600 bg-emerald-50' : 'border-gray-200 hover:border-emerald-300'
                   }`}
                 >
                   <div className="text-sm font-medium text-gray-900 mb-1">Yes — claim BUS grant</div>
-                  <div className="text-xs text-gray-500">£7,500 deducted from customer invoice. Admin team will be notified to process the application.</div>
+                  <div className="text-xs text-gray-500">£7,500 deducted from customer invoice. Admin team notified to process the application.</div>
                 </button>
                 <button
                   onClick={() => setClaimBus(false)}
                   className={`p-4 rounded-xl border-2 text-left transition-colors ${
-                    claimBus === false
-                      ? 'border-gray-600 bg-gray-50'
-                      : 'border-gray-200 hover:border-gray-300'
+                    claimBus === false ? 'border-gray-500 bg-gray-50' : 'border-gray-200 hover:border-gray-300'
                   }`}
                 >
                   <div className="text-sm font-medium text-gray-900 mb-1">No — proceed without BUS</div>
-                  <div className="text-xs text-gray-500">Continue the job without the BUS grant. This can be added later if circumstances change.</div>
+                  <div className="text-xs text-gray-500">Continue without the BUS grant. This can be added later if circumstances change.</div>
                 </button>
               </div>
 
@@ -710,7 +732,7 @@ export default function NewJobPage() {
                     <div>· Admin team will be notified and will begin the BUS application</div>
                     <div>· Customer must own and live in the property</div>
                     <div>· Property must have a valid EPC lodged within the last 10 years</div>
-                    <div>· Grant will be redeemed after installation and commissioning sign-off</div>
+                    <div>· Grant redeemed after installation and commissioning sign-off</div>
                   </div>
                 </div>
               )}
@@ -735,7 +757,7 @@ export default function NewJobPage() {
                 Next: Confirm →
               </button>
             </div>
-            {error && <p className="text-xs text-red-600">{error}</p>}
+            {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
           </div>
         )}
 
@@ -755,13 +777,17 @@ export default function NewJobPage() {
               {selectedEpc && (
                 <div className="bg-gray-50 rounded-xl p-4">
                   <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Property details</div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="grid grid-cols-2 gap-2 text-xs mb-3">
                     <div><span className="text-gray-500">Type: </span><span className="text-gray-900 font-medium">{selectedEpc.property_type}</span></div>
                     <div><span className="text-gray-500">Built: </span><span className="text-gray-900 font-medium">{selectedEpc.construction_age_band}</span></div>
                     <div><span className="text-gray-500">Area: </span><span className="text-gray-900 font-medium">{selectedEpc.total_floor_area}m²</span></div>
                     <div><span className="text-gray-500">EPC: </span><span className="text-gray-900 font-medium">{selectedEpc.current_energy_rating}</span></div>
                     <div className="col-span-2"><span className="text-gray-500">Heating: </span><span className="text-gray-900 font-medium">{selectedEpc.mainheat_description}</span></div>
                     <div className="col-span-2"><span className="text-gray-500">Walls: </span><span className="text-gray-900 font-medium">{selectedEpc.walls_description}</span></div>
+                  </div>
+                  <div className="border-t border-gray-200 pt-3">
+                    <div className="text-xs text-gray-500 mb-1">EPC Certificate Number</div>
+                    <div className="text-xs font-mono text-gray-700 break-all">{selectedEpc.lmk_key}</div>
                   </div>
                 </div>
               )}
@@ -772,8 +798,8 @@ export default function NewJobPage() {
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div><span className="text-gray-500">Design load: </span><span className="text-gray-900 font-medium">{(heatLoss.design_load_w / 1000).toFixed(1)} kW</span></div>
                     <div><span className="text-gray-500">Recommended: </span><span className="text-emerald-700 font-medium">{heatLoss.recommended_kw} kW ASHP</span></div>
-                    <div><span className="text-gray-500">Current energy spend: </span><span className="text-gray-900 font-medium">£{heatLoss.current_total_cost}/yr</span></div>
-                    <div><span className="text-gray-500">Annual usage: </span><span className="text-gray-900 font-medium">{heatLoss.annual_kwh_total.toLocaleString()} kWh</span></div>
+                    <div><span className="text-gray-500">Heating + HW cost: </span><span className="text-gray-900 font-medium">£{heatLoss.current_relevant_cost}/yr</span></div>
+                    <div><span className="text-gray-500">Annual usage: </span><span className="text-gray-900 font-medium">{heatLoss.annual_kwh_heat.toLocaleString()} kWh</span></div>
                   </div>
                 </div>
               )}
