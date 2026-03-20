@@ -16,7 +16,7 @@ import {
 export type WallElement = {
   id: string
   wallIndex: number
-  position: number
+  position: number       // 0–1 along wall
   type: 'window' | 'door' | 'radiator'
   widthMm: number
   heightMm: number
@@ -65,15 +65,12 @@ const ROOM_COLORS: Record<string, string> = {
 }
 
 const WALL_TYPES = ['external', 'internal', 'party', 'open']
-const WALL_TYPE_LABELS: Record<string, string> = {
-  external: 'Ext', internal: 'Int', party: 'Party', open: 'Open'
-}
-const WALL_COLORS: Record<string, string> = {
-  external: '#1f2937', internal: '#9ca3af', party: '#7c3aed', open: '#e5e7eb'
-}
-const WALL_WIDTHS: Record<string, number> = {
-  external: 4, internal: 2, party: 3, open: 1
-}
+const WALL_TYPE_LABELS: Record<string, string> = { external: 'Ext', internal: 'Int', party: 'Party', open: 'Open' }
+const WALL_COLORS: Record<string, string> = { external: '#1f2937', internal: '#9ca3af', party: '#7c3aed', open: '#e5e7eb' }
+const WALL_WIDTHS: Record<string, number> = { external: 4, internal: 2, party: 3, open: 1 }
+
+const EL_COLORS: Record<string, string> = { window: '#60a5fa', door: '#f59e0b', radiator: '#ef4444' }
+const EL_LABELS: Record<string, string> = { window: 'W', door: 'D', radiator: 'R' }
 
 function heatColor(w: number, areaMm2: number): string {
   if (areaMm2 <= 0 || w === 0) return '#f0fdf4'
@@ -97,12 +94,9 @@ function isRect(verts: Polygon): boolean {
 
 function moveRectVertex(verts: Polygon, idx: number, newPos: Vec2): Polygon {
   const n = 4
-  const prev = (idx + n - 1) % n
-  const next = (idx + 1) % n
-  const opp = (idx + 2) % n
+  const prev = (idx + n - 1) % n, next = (idx + 1) % n, opp = (idx + 2) % n
   const orig = verts[idx]
-  const dx = newPos.x - orig.x
-  const dy = newPos.y - orig.y
+  const dx = newPos.x - orig.x, dy = newPos.y - orig.y
   const dPrev = vecNorm(vecSub(verts[prev], orig))
   const dNext = vecNorm(vecSub(verts[next], orig))
   const movePrev = dx * dPrev.x + dy * dPrev.y
@@ -115,6 +109,8 @@ function moveRectVertex(verts: Polygon, idx: number, newPos: Vec2): Polygon {
   return result
 }
 
+type SelectedElement = { roomId: string; elementId: string }
+
 const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
   rooms, activeFloor, tool, gridMm, showGrid, showDimensions, showHeatLoss,
   backgroundImage, onRoomsChange, onRoomSelect, selectedRoomId,
@@ -126,12 +122,11 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
   const [cursorPt, setCursorPt] = useState<Vec2 | null>(null)
   const [dragState, setDragState] = useState<any>(null)
   const [selectedWall, setSelectedWall] = useState<{ roomId: string; wallIdx: number } | null>(null)
+  const [selectedElement, setSelectedElement] = useState<SelectedElement | null>(null)
+  const [wallMenu, setWallMenu] = useState<{ x: number; y: number; roomId: string; wallIdx: number } | null>(null)
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 })
   const [isMobile, setIsMobile] = useState(false)
-  const touchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null)
-
-  // Wall context menu state
-  const [wallMenu, setWallMenu] = useState<{ x: number; y: number; roomId: string; wallIdx: number } | null>(null)
+  const touchRef = useRef<{ dist: number } | null>(null)
 
   useEffect(() => {
     setIsMobile('ontouchstart' in window || window.innerWidth < 768)
@@ -139,11 +134,9 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
       for (const e of entries) setContainerSize({ w: e.contentRect.width, h: e.contentRect.height })
     })
     if (containerRef.current) obs.observe(containerRef.current)
-
     const svgEl = svgRef.current
     const onWheel = (e: WheelEvent) => {
-      e.preventDefault()
-      e.stopPropagation()
+      e.preventDefault(); e.stopPropagation()
       const rect = svgEl?.getBoundingClientRect()
       if (!rect) return
       const px = { x: e.clientX - rect.left, y: e.clientY - rect.top }
@@ -208,63 +201,81 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
       id, name: '', roomType: 'Living room', floor: activeFloor,
       vertices: drawVerts, wallTypes: new Array(drawVerts.length).fill('external'), elements: [],
     }
-    const upd = reAdj([...rooms, nr])
-    onRoomsChange(upd)
+    onRoomsChange(reAdj([...rooms, nr]))
     onRoomSelect(id)
     setDrawVerts([])
   }
 
-  // ─── Hit testing helpers ──────────────────────────────────────────────────────
-
   function hitTestWall(pxPt: Vec2, room: CanvasRoom): number {
-    // Returns wall index if within 10px of wall, -1 otherwise
     for (let i = 0; i < room.vertices.length; i++) {
       const a = worldToPx(room.vertices[i], vp)
       const b = worldToPx(room.vertices[(i + 1) % room.vertices.length], vp)
-      const dx = b.x - a.x, dy = b.y - a.y
-      const len2 = dx * dx + dy * dy
+      const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy
       if (len2 < 1) continue
       const t = Math.max(0, Math.min(1, ((pxPt.x - a.x) * dx + (pxPt.y - a.y) * dy) / len2))
       const px = a.x + t * dx, py = a.y + t * dy
-      const dist = Math.sqrt((pxPt.x - px) ** 2 + (pxPt.y - py) ** 2)
-      if (dist < 10) return i
+      if (Math.sqrt((pxPt.x - px) ** 2 + (pxPt.y - py) ** 2) < 10) return i
     }
     return -1
   }
 
   function hitTestVertex(pxPt: Vec2, room: CanvasRoom): number {
     const r = isMobile ? 18 : 10
-    for (let i = 0; i < room.vertices.length; i++) {
+    for (let i = 0; i < room.vertices.length; i++)
       if (vecDist(pxPt, worldToPx(room.vertices[i], vp)) < r) return i
-    }
     return -1
   }
 
-  // Mid-wall handle hit test
   function hitTestMidHandle(pxPt: Vec2, room: CanvasRoom): number {
     const r = isMobile ? 18 : 12
     for (let i = 0; i < room.vertices.length; i++) {
       const a = worldToPx(room.vertices[i], vp)
       const b = worldToPx(room.vertices[(i + 1) % room.vertices.length], vp)
-      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
-      if (vecDist(pxPt, { x: mx, y: my }) < r) return i
+      if (vecDist(pxPt, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }) < r) return i
     }
     return -1
   }
 
-  function addElementToWall(roomId: string, wallIdx: number, worldPt: Vec2, type: 'window' | 'door' | 'radiator') {
+  // Hit test a wall element — returns elementId or null
+  function hitTestElement(pxPt: Vec2, room: CanvasRoom): string | null {
+    for (const el of room.elements) {
+      const a = room.vertices[el.wallIndex]
+      const b = room.vertices[(el.wallIndex + 1) % room.vertices.length]
+      const pA = worldToPx(a, vp), pB = worldToPx(b, vp)
+      const ex = pA.x + el.position * (pB.x - pA.x)
+      const ey = pA.y + el.position * (pB.y - pA.y)
+      const wPx = mmToPx(el.widthMm, vp.zoom)
+      if (Math.abs(pxPt.x - ex) < wPx / 2 + 6 && Math.abs(pxPt.y - ey) < 10) {
+        return el.id
+      }
+    }
+    return null
+  }
+
+  function addElement(roomId: string, wallIdx: number, worldPt: Vec2, type: 'window' | 'door' | 'radiator') {
     const room = rooms.find(r => r.id === roomId)
     if (!room) return
-    const a = room.vertices[wallIdx]
-    const b = room.vertices[(wallIdx + 1) % room.vertices.length]
+    const a = room.vertices[wallIdx], b = room.vertices[(wallIdx + 1) % room.vertices.length]
     const wallLen = vecDist(a, b)
     if (wallLen < 1) return
-    const t = Math.max(0.05, Math.min(0.95,
-      ((worldPt.x - a.x) * (b.x - a.x) + (worldPt.y - a.y) * (b.y - a.y)) / (wallLen * wallLen)
-    ))
+    const t = Math.max(0.05, Math.min(0.95, ((worldPt.x - a.x) * (b.x - a.x) + (worldPt.y - a.y) * (b.y - a.y)) / (wallLen * wallLen)))
     const widthMm = type === 'radiator' ? 1200 : type === 'door' ? 900 : 1200
     const el: WallElement = { id: `el_${Date.now()}`, wallIndex: wallIdx, position: t, type, widthMm, heightMm: type === 'door' ? 2100 : 1200 }
     onRoomsChange(rooms.map(r => r.id !== roomId ? r : { ...r, elements: [...r.elements, el] }))
+    setSelectedElement({ roomId, elementId: el.id })
+  }
+
+  function updateElement(roomId: string, elId: string, updates: Partial<WallElement>) {
+    onRoomsChange(rooms.map(r => r.id !== roomId ? r : {
+      ...r, elements: r.elements.map(e => e.id !== elId ? e : { ...e, ...updates })
+    }))
+  }
+
+  function deleteElement(roomId: string, elId: string) {
+    onRoomsChange(rooms.map(r => r.id !== roomId ? r : {
+      ...r, elements: r.elements.filter(e => e.id !== elId)
+    }))
+    if (selectedElement?.elementId === elId) setSelectedElement(null)
   }
 
   // ─── Pointer events ───────────────────────────────────────────────────────────
@@ -275,15 +286,13 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
     const worldPt = world(pxPt)
 
     if (tool === 'pan' || e.buttons === 4) {
-      setDragState({ type: 'pan', startPx: pxPt, startVp: { ...vp } })
-      return
+      setDragState({ type: 'pan', startPx: pxPt, startVp: { ...vp } }); return
     }
 
     if (tool === 'draw') {
       if (e.button === 2) { closeDraw(); return }
       if (drawVerts.length >= 3 && vecDist(pxPt, worldToPx(drawVerts[0], vp)) < 15) { closeDraw(); return }
-      setDrawVerts(p => [...p, worldPt])
-      return
+      setDrawVerts(p => [...p, worldPt]); return
     }
 
     if (tool === 'addWindow' || tool === 'addDoor' || tool === 'addRadiator') {
@@ -291,7 +300,7 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
       const fr = rooms.filter(r => r.floor === activeFloor)
       for (let i = fr.length - 1; i >= 0; i--) {
         const wi = hitTestWall(pxPt, fr[i])
-        if (wi >= 0) { addElementToWall(fr[i].id, wi, worldPt, type); return }
+        if (wi >= 0) { addElement(fr[i].id, wi, worldPt, type); return }
       }
       return
     }
@@ -300,38 +309,52 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
       const fr = rooms.filter(r => r.floor === activeFloor)
       const selRoom = fr.find(r => r.id === selectedRoomId)
 
-      // 1. Vertex handle of selected room
+      // 1. Check element hit on selected room first
       if (selRoom) {
+        const elId = hitTestElement(pxPt, selRoom)
+        if (elId) {
+          setSelectedElement({ roomId: selRoom.id, elementId: elId })
+          return
+        }
+        // 2. Vertex handle
         const vi = hitTestVertex(pxPt, selRoom)
         if (vi >= 0) {
-          setDragState({ type: 'vertex', roomId: selRoom.id, vi, startVerts: [...selRoom.vertices], rect: isRect(selRoom.vertices) })
-          return
+          setSelectedElement(null)
+          setDragState({ type: 'vertex', roomId: selRoom.id, vi, startVerts: [...selRoom.vertices], rect: isRect(selRoom.vertices) }); return
         }
-        // 2. Mid-wall handle (pushes/pulls that wall)
+        // 3. Mid-wall handle
         const mi = hitTestMidHandle(pxPt, selRoom)
         if (mi >= 0) {
-          setDragState({ type: 'midwall', roomId: selRoom.id, wi: mi, startVerts: [...selRoom.vertices] })
-          return
+          setSelectedElement(null)
+          setDragState({ type: 'midwall', roomId: selRoom.id, wi: mi, startVerts: [...selRoom.vertices] }); return
         }
-        // 3. Wall click — select wall
+        // 4. Wall click — select wall
         const wi = hitTestWall(pxPt, selRoom)
         if (wi >= 0) {
-          setSelectedWall({ roomId: selRoom.id, wallIdx: wi })
-          return
+          setSelectedElement(null)
+          setSelectedWall({ roomId: selRoom.id, wallIdx: wi }); return
         }
       }
 
-      // 4. Room hit
+      // 5. Check elements on any floor room
+      for (let i = fr.length - 1; i >= 0; i--) {
+        const elId = hitTestElement(pxPt, fr[i])
+        if (elId) {
+          onRoomSelect(fr[i].id)
+          setSelectedElement({ roomId: fr[i].id, elementId: elId }); return
+        }
+      }
+
+      // 6. Room hit
       for (let i = fr.length - 1; i >= 0; i--) {
         if (pointInPolygon(worldPt, fr[i].vertices)) {
           onRoomSelect(fr[i].id)
+          setSelectedElement(null)
           setSelectedWall(null)
-          setDragState({ type: 'room', roomId: fr[i].id, startPx: pxPt, startVerts: [...fr[i].vertices] })
-          return
+          setDragState({ type: 'room', roomId: fr[i].id, startPx: pxPt, startVerts: [...fr[i].vertices] }); return
         }
       }
-      onRoomSelect(null)
-      setSelectedWall(null)
+      onRoomSelect(null); setSelectedElement(null); setSelectedWall(null)
     }
   }
 
@@ -342,8 +365,7 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
 
     if (dragState.type === 'pan') {
       const dx = pxPt.x - dragState.startPx.x, dy = pxPt.y - dragState.startPx.y
-      setVp({ ...dragState.startVp, x: dragState.startVp.x + dx, y: dragState.startVp.y + dy })
-      return
+      setVp({ ...dragState.startVp, x: dragState.startVp.x + dx, y: dragState.startVp.y + dy }); return
     }
 
     const worldPt = world(pxPt)
@@ -356,41 +378,22 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
           : dragState.startVerts.map((v: Vec2, i: number) => i === dragState.vi ? worldPt : v)
         return { ...r, vertices: nv }
       })
-      onRoomsChange(reAdj(upd))
-      return
+      onRoomsChange(reAdj(upd)); return
     }
 
     if (dragState.type === 'midwall') {
-      const room = rooms.find(r => r.id === dragState.roomId)
-      if (!room) return
-      const verts = dragState.startVerts
-      const n = verts.length
-      const wi = dragState.wi
+      const room = rooms.find(r => r.id === dragState.roomId); if (!room) return
+      const verts = dragState.startVerts, n = verts.length, wi = dragState.wi
       const a = verts[wi], b = verts[(wi + 1) % n]
-      const prev = verts[(wi + n - 1) % n]
-      const next = verts[(wi + 2) % n]
-
-      // Wall normal (perpendicular direction)
       const wallDir = { x: b.x - a.x, y: b.y - a.y }
       const wallLen = Math.sqrt(wallDir.x ** 2 + wallDir.y ** 2)
       const normal = { x: -wallDir.y / wallLen, y: wallDir.x / wallLen }
-
-      // How far has the cursor moved along the normal?
       const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
-      const dmm = { x: worldPt.x - mx, y: worldPt.y - my }
-      const push = dmm.x * normal.x + dmm.y * normal.y
-      const snappedPush = Math.round(push / gridMm) * gridMm
-
-      // Move both vertices of this wall along the normal
-      const newA = snapToGrid({ x: a.x + normal.x * snappedPush, y: a.y + normal.y * snappedPush }, gridMm)
-      const newB = snapToGrid({ x: b.x + normal.x * snappedPush, y: b.y + normal.y * snappedPush }, gridMm)
-
+      const push = Math.round(((worldPt.x - mx) * normal.x + (worldPt.y - my) * normal.y) / gridMm) * gridMm
       const newVerts = [...verts]
-      newVerts[wi] = newA
-      newVerts[(wi + 1) % n] = newB
-
-      onRoomsChange(reAdj(rooms.map(r => r.id !== dragState.roomId ? r : { ...r, vertices: newVerts })))
-      return
+      newVerts[wi] = snapToGrid({ x: a.x + normal.x * push, y: a.y + normal.y * push }, gridMm)
+      newVerts[(wi + 1) % n] = snapToGrid({ x: b.x + normal.x * push, y: b.y + normal.y * push }, gridMm)
+      onRoomsChange(reAdj(rooms.map(r => r.id !== dragState.roomId ? r : { ...r, vertices: newVerts }))); return
     }
 
     if (dragState.type === 'room') {
@@ -404,28 +407,20 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
 
   function onPointerUp() { setDragState(null) }
 
-  // Touch pinch zoom
   function onTouchStart(e: React.TouchEvent) {
     if (e.touches.length === 2) {
-      const dx = e.touches[1].clientX - e.touches[0].clientX
-      const dy = e.touches[1].clientY - e.touches[0].clientY
-      touchRef.current = {
-        dist: Math.sqrt(dx * dx + dy * dy),
-        cx: (e.touches[0].clientX + e.touches[1].clientX) / 2,
-        cy: (e.touches[0].clientY + e.touches[1].clientY) / 2,
-      }
+      const dx = e.touches[1].clientX - e.touches[0].clientX, dy = e.touches[1].clientY - e.touches[0].clientY
+      touchRef.current = { dist: Math.sqrt(dx * dx + dy * dy) }
     }
   }
 
   function onTouchMove(e: React.TouchEvent) {
     e.preventDefault()
     if (e.touches.length === 2 && touchRef.current) {
-      const dx = e.touches[1].clientX - e.touches[0].clientX
-      const dy = e.touches[1].clientY - e.touches[0].clientY
+      const dx = e.touches[1].clientX - e.touches[0].clientX, dy = e.touches[1].clientY - e.touches[0].clientY
       const dist = Math.sqrt(dx * dx + dy * dy)
       const factor = dist / touchRef.current.dist
-      const rect = svgRef.current?.getBoundingClientRect()
-      if (!rect) return
+      const rect = svgRef.current?.getBoundingClientRect(); if (!rect) return
       const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left
       const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top
       setVp(prev => {
@@ -439,23 +434,18 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
 
   function onDoubleClick(e: React.MouseEvent) {
     if (tool !== 'select' || !selectedRoomId) return
-    const pxPt = getPt(e)
-    const worldPt = world(pxPt, false)
-    const room = rooms.find(r => r.id === selectedRoomId)
-    if (!room) return
+    const pxPt = getPt(e), worldPt = world(pxPt, false)
+    const room = rooms.find(r => r.id === selectedRoomId); if (!room) return
     for (let i = 0; i < room.vertices.length; i++) {
       const a = room.vertices[i], b = room.vertices[(i + 1) % room.vertices.length]
-      const dx = b.x - a.x, dy = b.y - a.y
-      const len2 = dx * dx + dy * dy
+      const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy
       if (len2 < 1) continue
       const t = Math.max(0, Math.min(1, ((worldPt.x - a.x) * dx + (worldPt.y - a.y) * dy) / len2))
       const px = a.x + t * dx, py = a.y + t * dy
-      const pxDist = vecDist(worldToPx({ x: px, y: py }, vp), pxPt)
-      if (pxDist < 12) {
-        const nv = snapToGrid({ x: px, y: py }, gridMm)
-        const newVerts = [...room.vertices]; newVerts.splice(i + 1, 0, nv)
-        const newWT = [...room.wallTypes]; newWT.splice(i + 1, 0, newWT[i])
-        onRoomsChange(reAdj(rooms.map(r => r.id === selectedRoomId ? { ...r, vertices: newVerts, wallTypes: newWT } : r)))
+      if (vecDist(worldToPx({ x: px, y: py }, vp), pxPt) < 12) {
+        const nv = [...room.vertices]; nv.splice(i + 1, 0, snapToGrid({ x: px, y: py }, gridMm))
+        const nwt = [...room.wallTypes]; nwt.splice(i + 1, 0, nwt[i])
+        onRoomsChange(reAdj(rooms.map(r => r.id === selectedRoomId ? { ...r, vertices: nv, wallTypes: nwt } : r)))
         return
       }
     }
@@ -464,41 +454,28 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
   function onContextMenu(e: React.MouseEvent) {
     e.preventDefault()
     if (tool === 'draw' && drawVerts.length >= 3) { closeDraw(); return }
-    // Right-click on a wall → show wall menu
-    if (tool === 'select' && selectedRoomId) {
+    // Right-click on element = delete it
+    if (tool === 'select') {
       const pxPt = getPt(e)
-      const room = rooms.find(r => r.id === selectedRoomId)
-      if (room) {
-        const wi = hitTestWall(pxPt, room)
-        if (wi >= 0) {
-          setWallMenu({ x: e.clientX, y: e.clientY, roomId: selectedRoomId, wallIdx: wi })
-        }
+      const fr = rooms.filter(r => r.floor === activeFloor)
+      for (let i = fr.length - 1; i >= 0; i--) {
+        const elId = hitTestElement(pxPt, fr[i])
+        if (elId) { deleteElement(fr[i].id, elId); return }
+      }
+      // Right-click on wall = show wall type menu
+      const selRoom = fr.find(r => r.id === selectedRoomId)
+      if (selRoom) {
+        const wi = hitTestWall(pxPt, selRoom)
+        if (wi >= 0) { setWallMenu({ x: e.clientX, y: e.clientY, roomId: selRoom.id, wallIdx: wi }); return }
       }
     }
   }
 
-  function cycleWallType(roomId: string, wi: number) {
-    onRoomsChange(rooms.map(r => r.id !== roomId ? r : {
-      ...r,
-      wallTypes: r.wallTypes.map((t, i) => i === wi ? WALL_TYPES[(WALL_TYPES.indexOf(t) + 1) % WALL_TYPES.length] : t)
-    }))
-    setWallMenu(null)
-    setSelectedWall({ roomId, wallIdx: wi })
-  }
-
-  function setWallType(roomId: string, wi: number, type: string) {
-    onRoomsChange(rooms.map(r => r.id !== roomId ? r : {
-      ...r, wallTypes: r.wallTypes.map((t, i) => i === wi ? type : t)
-    }))
-    setWallMenu(null)
-  }
-
-  // ─── Render ───────────────────────────────────────────────────────────────────
+  // ─── Rendering ────────────────────────────────────────────────────────────────
 
   function renderGrid() {
     if (!showGrid) return null
-    const step = mmToPx(gridMm, vp.zoom)
-    if (step < 4) return null
+    const step = mmToPx(gridMm, vp.zoom); if (step < 4) return null
     const lines = []
     for (let x = ((- vp.x % step) + step) % step; x < containerSize.w; x += step)
       lines.push(<line key={`gx${x}`} x1={x} y1={0} x2={x} y2={containerSize.h} stroke="#e5e7eb" strokeWidth={0.5}/>)
@@ -511,21 +488,16 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
     const pts = room.vertices.map(v => worldToPx(v, vp))
     const ptsStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
     const isSel = room.id === selectedRoomId
-    const areaMm2 = Math.abs(room.vertices.reduce((s, v, i) => {
-      const j = (i + 1) % room.vertices.length
-      return s + v.x * room.vertices[j].y - room.vertices[j].x * v.y
-    }, 0)) / 2
+    const areaMm2 = Math.abs(room.vertices.reduce((s, v, i) => { const j = (i + 1) % room.vertices.length; return s + v.x * room.vertices[j].y - room.vertices[j].x * v.y }, 0)) / 2
     const fill = showHeatLoss && room.heatLossW ? heatColor(room.heatLossW, areaMm2) : (ROOM_COLORS[room.roomType] || '#f3f4f6')
     const centroid = polygonCentroid(pts)
     const lblSz = Math.max(7, Math.min(13, mmToPx(1400, vp.zoom)))
 
     return (
       <g key={room.id}>
-        {/* Fill */}
         <polygon points={ptsStr} fill={fill}
           stroke={isSel ? '#059669' : '#9ca3af'} strokeWidth={isSel ? 0 : 0.5}
-          style={{ cursor: tool === 'select' ? 'move' : 'crosshair' }}
-        />
+          style={{ cursor: tool === 'select' ? 'move' : 'crosshair' }}/>
 
         {/* Walls */}
         {room.vertices.map((v, i) => {
@@ -540,10 +512,9 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
           return (
             <g key={`w${i}`}>
               {/* Invisible thick hit target */}
-              <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                stroke="transparent" strokeWidth={16}
+              <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={16}
                 style={{ cursor: 'pointer' }}
-                onClick={e => { e.stopPropagation(); setSelectedWall({ roomId: room.id, wallIdx: i }); onRoomSelect(room.id) }}
+                onClick={e => { e.stopPropagation(); setSelectedElement(null); setSelectedWall({ roomId: room.id, wallIdx: i }); onRoomSelect(room.id) }}
                 onContextMenu={e => { e.preventDefault(); setWallMenu({ x: e.clientX, y: e.clientY, roomId: room.id, wallIdx: i }); onRoomSelect(room.id) }}
               />
               {/* Visual wall */}
@@ -551,109 +522,110 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
                 stroke={isSelWall ? '#f59e0b' : color}
                 strokeWidth={isSelWall ? width + 1.5 : width}
                 strokeDasharray={wt === 'internal' ? '6,4' : wt === 'party' ? '12,5' : wt === 'open' ? '3,3' : 'none'}
-                style={{ pointerEvents: 'none' }}
-              />
+                style={{ pointerEvents: 'none' }}/>
 
-              {/* Dimension label */}
+              {/* Dimension */}
               {showDimensions && isSel && pxLen > 40 && (() => {
                 const len = wallLength(room.vertices, i)
                 const dx = b.x - a.x, dy = b.y - a.y, nl = pxLen
                 const nx = -dy / nl * 15, ny = dx / nl * 15
                 const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
-                return (
-                  <text x={mx + nx} y={my + ny} textAnchor="middle" dominantBaseline="middle"
-                    fontSize={Math.max(8, mmToPx(210, vp.zoom))} fill="#374151" fontFamily="monospace"
-                    style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                    {len >= 1000 ? `${(len/1000).toFixed(2)}m` : `${Math.round(len)}mm`}
-                  </text>
-                )
+                return <text x={mx + nx} y={my + ny} textAnchor="middle" dominantBaseline="middle"
+                  fontSize={Math.max(8, mmToPx(210, vp.zoom))} fill="#374151" fontFamily="monospace"
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                  {len >= 1000 ? `${(len / 1000).toFixed(2)}m` : `${Math.round(len)}mm`}
+                </text>
               })()}
 
-              {/* Mid-wall pill handle (selected room only, wall long enough) */}
+              {/* Mid-wall pill */}
               {isSel && pxLen > 50 && (() => {
                 const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
                 const isSelW = selectedWall?.roomId === room.id && selectedWall.wallIdx === i
-                return (
-                  <g style={{ cursor: 'ns-resize' }}>
-                    {/* Pill background */}
-                    <rect x={mx - 22} y={my - 9} width={44} height={18} rx={9}
-                      fill={isSelW ? '#f59e0b' : 'white'}
-                      stroke={color} strokeWidth={1.5}
-                    />
-                    {/* Wall type abbreviation */}
-                    <text x={mx} y={my} textAnchor="middle" dominantBaseline="middle"
-                      fontSize={9} fill={isSelW ? 'white' : color}
-                      fontWeight="600" fontFamily="sans-serif"
-                      style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                      {WALL_TYPE_LABELS[wt] || 'Ext'}
-                    </text>
-                  </g>
-                )
+                return <g style={{ cursor: 'ns-resize' }}>
+                  <rect x={mx - 22} y={my - 9} width={44} height={18} rx={9}
+                    fill={isSelW ? '#f59e0b' : 'white'} stroke={color} strokeWidth={1.5}/>
+                  <text x={mx} y={my} textAnchor="middle" dominantBaseline="middle"
+                    fontSize={9} fill={isSelW ? 'white' : color} fontWeight="600" fontFamily="sans-serif"
+                    style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                    {WALL_TYPE_LABELS[wt] || 'Ext'}
+                  </text>
+                </g>
               })()}
             </g>
           )
         })}
 
         {/* Labels */}
-        {lblSz > 6 && (
-          <text x={centroid.x} y={centroid.y - (showHeatLoss && room.heatLossW ? lblSz * 0.7 : 0)}
-            textAnchor="middle" dominantBaseline="middle"
-            fontSize={lblSz} fill="#111827" fontWeight={isSel ? '600' : '400'}
-            style={{ pointerEvents: 'none', userSelect: 'none' }}>
-            {room.name || room.roomType}
-          </text>
-        )}
-        {showHeatLoss && room.heatLossW && lblSz > 6 && (
-          <text x={centroid.x} y={centroid.y + lblSz * 0.9}
-            textAnchor="middle" dominantBaseline="middle"
-            fontSize={lblSz * 0.85} fill="#059669"
-            style={{ pointerEvents: 'none', userSelect: 'none' }}>
-            {room.heatLossW}W
-          </text>
-        )}
-        {isSel && areaMm2 > 0 && lblSz > 8 && (
-          <text x={centroid.x} y={centroid.y + lblSz * (showHeatLoss && room.heatLossW ? 1.8 : 1.1)}
-            textAnchor="middle" dominantBaseline="middle"
-            fontSize={lblSz * 0.75} fill="#6b7280"
-            style={{ pointerEvents: 'none' }}>
-            {(areaMm2 / 1_000_000).toFixed(1)}m²
-          </text>
-        )}
+        {lblSz > 6 && <text x={centroid.x} y={centroid.y - (showHeatLoss && room.heatLossW ? lblSz * 0.7 : 0)}
+          textAnchor="middle" dominantBaseline="middle"
+          fontSize={lblSz} fill="#111827" fontWeight={isSel ? '600' : '400'}
+          style={{ pointerEvents: 'none', userSelect: 'none' }}>
+          {room.name || room.roomType}
+        </text>}
+        {showHeatLoss && room.heatLossW && lblSz > 6 && <text x={centroid.x} y={centroid.y + lblSz * 0.9}
+          textAnchor="middle" dominantBaseline="middle"
+          fontSize={lblSz * 0.85} fill="#059669"
+          style={{ pointerEvents: 'none', userSelect: 'none' }}>
+          {room.heatLossW}W
+        </text>}
+        {isSel && areaMm2 > 0 && lblSz > 8 && <text x={centroid.x} y={centroid.y + lblSz * (showHeatLoss && room.heatLossW ? 1.8 : 1.1)}
+          textAnchor="middle" dominantBaseline="middle"
+          fontSize={lblSz * 0.75} fill="#6b7280" style={{ pointerEvents: 'none' }}>
+          {(areaMm2 / 1_000_000).toFixed(1)}m²
+        </text>}
 
         {/* Vertex handles */}
         {isSel && pts.map((p, i) => (
           <circle key={`vh${i}`} cx={p.x} cy={p.y} r={isMobile ? 10 : 7}
-            fill="white" stroke="#059669" strokeWidth={2.5}
-            style={{ cursor: 'grab' }}
-          />
+            fill="white" stroke="#059669" strokeWidth={2.5} style={{ cursor: 'grab' }}/>
         ))}
 
         {/* Wall elements */}
         {room.elements.map(el => {
-          const a = room.vertices[el.wallIndex]
-          const b = room.vertices[(el.wallIndex + 1) % room.vertices.length]
+          const a = room.vertices[el.wallIndex], b = room.vertices[(el.wallIndex + 1) % room.vertices.length]
           const pA = worldToPx(a, vp), pB = worldToPx(b, vp)
           const ex = pA.x + el.position * (pB.x - pA.x)
           const ey = pA.y + el.position * (pB.y - pA.y)
           const wPx = mmToPx(el.widthMm, vp.zoom)
-          const col = el.type === 'window' ? '#60a5fa' : el.type === 'door' ? '#f59e0b' : '#f87171'
+          const col = EL_COLORS[el.type]
+          const isSelEl = selectedElement?.roomId === room.id && selectedElement?.elementId === el.id
           const dx = pB.x - pA.x, dy = pB.y - pA.y, len = Math.sqrt(dx * dx + dy * dy)
           const angle = len > 0 ? Math.atan2(dy, dx) * 180 / Math.PI : 0
+
           return (
-            <g key={el.id} transform={`translate(${ex},${ey}) rotate(${angle})`}
+            <g key={el.id}
+              transform={`translate(${ex},${ey}) rotate(${angle})`}
               style={{ cursor: 'pointer' }}
               onClick={e => {
                 e.stopPropagation()
-                onRoomsChange(rooms.map(r => r.id !== room.id ? r : { ...r, elements: r.elements.filter(e2 => e2.id !== el.id) }))
+                // Left click = select
+                setSelectedElement({ roomId: room.id, elementId: el.id })
+                onRoomSelect(room.id)
+              }}
+              onContextMenu={e => {
+                e.preventDefault()
+                e.stopPropagation()
+                // Right click = delete
+                deleteElement(room.id, el.id)
               }}>
-              <rect x={-wPx/2} y={-5} width={wPx} height={10} fill={col} stroke="white" strokeWidth={1} rx={2}/>
-              {wPx > 20 && (
-                <text x={0} y={0} textAnchor="middle" dominantBaseline="middle"
-                  fontSize={8} fill="white" fontWeight="600"
-                  style={{ pointerEvents: 'none' }}>
-                  {el.type === 'window' ? 'W' : el.type === 'door' ? 'D' : 'R'}
-                </text>
-              )}
+              {/* Hit target */}
+              <rect x={-wPx / 2 - 4} y={-8} width={wPx + 8} height={16} fill="transparent"/>
+              {/* Visual */}
+              <rect x={-wPx / 2} y={-5} width={wPx} height={10}
+                fill={isSelEl ? 'white' : col}
+                stroke={isSelEl ? col : 'white'}
+                strokeWidth={isSelEl ? 2 : 1} rx={2}/>
+              {/* Label */}
+              {wPx > 16 && <text x={0} y={0} textAnchor="middle" dominantBaseline="middle"
+                fontSize={9} fill={isSelEl ? col : 'white'} fontWeight="700"
+                style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                {EL_LABELS[el.type]}
+              </text>}
+              {/* Selection handles */}
+              {isSelEl && <>
+                <circle cx={-wPx / 2} cy={0} r={4} fill={col} style={{ cursor: 'ew-resize' }}/>
+                <circle cx={wPx / 2} cy={0} r={4} fill={col} style={{ cursor: 'ew-resize' }}/>
+              </>}
             </g>
           )
         })}
@@ -665,29 +637,31 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
     if (tool !== 'draw' || drawVerts.length === 0) return null
     const pts = drawVerts.map(v => worldToPx(v, vp))
     const cur = cursorPt ? worldToPx(cursorPt, vp) : null
-    const all = cur ? [...pts, cur] : pts
     return (
       <g>
-        <polyline points={all.map(p => `${p.x},${p.y}`).join(' ')}
+        <polyline points={[...pts, cur].filter(Boolean).map(p => `${p!.x},${p!.y}`).join(' ')}
           fill="none" stroke="#059669" strokeWidth={2} strokeDasharray="7,4"/>
         {pts.map((p, i) => (
-          <circle key={i} cx={p.x} cy={p.y}
-            r={i === 0 && drawVerts.length >= 3 ? 10 : 5}
+          <circle key={i} cx={p.x} cy={p.y} r={i === 0 && drawVerts.length >= 3 ? 10 : 5}
             fill={i === 0 && drawVerts.length >= 3 ? '#059669' : 'white'}
             stroke="#059669" strokeWidth={2}/>
         ))}
-        {drawVerts.length >= 3 && <text x={pts[0].x+14} y={pts[0].y-8} fontSize={10} fill="#059669">close</text>}
+        {drawVerts.length >= 3 && <text x={pts[0].x + 14} y={pts[0].y - 8} fontSize={10} fill="#059669">close</text>}
       </g>
     )
   }
 
   const fr = rooms.filter(r => r.floor === activeFloor)
+  // Find selected element data for properties panel
+  const selElRoom = selectedElement ? rooms.find(r => r.id === selectedElement.roomId) : null
+  const selEl = selElRoom?.elements.find(e => e.id === selectedElement?.elementId) || null
 
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-white rounded-xl border border-gray-200 select-none"
       style={{ touchAction: 'none' }}>
+
       <svg ref={svgRef} width={containerSize.w} height={containerSize.h}
-        style={{ cursor: tool === 'draw' ? 'crosshair' : tool === 'pan' ? 'grab' : dragState?.type === 'pan' ? 'grabbing' : 'default', display: 'block' }}
+        style={{ cursor: tool === 'draw' ? 'crosshair' : tool === 'pan' ? 'grab' : 'default', display: 'block' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -695,12 +669,9 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onDoubleClick={onDoubleClick}
-        onContextMenu={onContextMenu}
-      >
-        {backgroundImage && (
-          <image href={backgroundImage} x={vp.x} y={vp.y} opacity={0.35}
-            width={mmToPx(20000, vp.zoom)}/>
-        )}
+        onContextMenu={onContextMenu}>
+
+        {backgroundImage && <image href={backgroundImage} x={vp.x} y={vp.y} opacity={0.35} width={mmToPx(20000, vp.zoom)}/>}
         {renderGrid()}
         {fr.filter(r => r.id !== selectedRoomId).map(r => renderRoom(r))}
         {fr.filter(r => r.id === selectedRoomId).map(r => renderRoom(r))}
@@ -713,17 +684,76 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
           <line x1={10} y1={10} x2={10} y2={18} stroke="#374151" strokeWidth={1.5}/>
           <line x1={100} y1={10} x2={100} y2={18} stroke="#374151" strokeWidth={1.5}/>
           <text x={55} y={9} textAnchor="middle" fontSize={9} fill="#374151" fontFamily="monospace">
-            {pxToMm(90,vp.zoom)>=1000 ? `${(pxToMm(90,vp.zoom)/1000).toFixed(1)}m` : `${Math.round(pxToMm(90,vp.zoom))}mm`}
+            {pxToMm(90, vp.zoom) >= 1000 ? `${(pxToMm(90, vp.zoom) / 1000).toFixed(1)}m` : `${Math.round(pxToMm(90, vp.zoom))}mm`}
           </text>
         </g>
 
-        {/* Tool hints */}
-        {tool === 'draw' && <text x={10} y={18} fontSize={10} fill="#6b7280">Click to add points · Right-click or click first point to close</text>}
-        {(tool==='addWindow'||tool==='addDoor'||tool==='addRadiator') && <text x={10} y={18} fontSize={10} fill="#6b7280">Click on a wall to place {tool==='addWindow'?'window':tool==='addDoor'?'door':'radiator'} · Click element to remove</text>}
-        {tool==='select' && selectedRoomId && <text x={10} y={18} fontSize={10} fill="#6b7280">Drag corner to resize · Drag pill to push wall · Click wall to select · Right-click wall for type · Dbl-click wall to add vertex</text>}
+        {/* Hints */}
+        {tool === 'draw' && <text x={10} y={18} fontSize={10} fill="#6b7280">Click to place points · Right-click or click first point to close</text>}
+        {(tool === 'addWindow' || tool === 'addDoor' || tool === 'addRadiator') &&
+          <text x={10} y={18} fontSize={10} fill="#6b7280">
+            Click on a wall to place · Left-click placed element to select · Right-click to delete
+          </text>}
+        {tool === 'select' && selectedRoomId && !selEl &&
+          <text x={10} y={18} fontSize={10} fill="#6b7280">
+            Drag corner to resize · Drag pill to push wall · Click wall to select · Right-click wall for type · Dbl-click edge to add vertex
+          </text>}
+        {tool === 'select' && selEl &&
+          <text x={10} y={18} fontSize={10} fill="#6b7280">
+            Element selected — edit size below · Right-click to delete
+          </text>}
       </svg>
 
-      {/* Wall context menu */}
+      {/* ── Element properties panel ──────────────────────────────────────────── */}
+      {selEl && selElRoom && (
+        <div className="absolute bottom-10 left-3 bg-white border-2 rounded-xl shadow-lg p-3 z-20 min-w-[220px]"
+          style={{ borderColor: EL_COLORS[selEl.type] }}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <span className="w-6 h-6 rounded flex items-center justify-center text-white text-xs font-bold"
+                style={{ background: EL_COLORS[selEl.type] }}>
+                {EL_LABELS[selEl.type]}
+              </span>
+              <span className="text-xs font-semibold text-gray-900 capitalize">{selEl.type}</span>
+            </div>
+            <button onClick={() => deleteElement(selElRoom.id, selEl.id)}
+              className="text-xs text-red-500 hover:text-red-700 font-medium px-2 py-0.5 rounded hover:bg-red-50">
+              Delete
+            </button>
+          </div>
+          <div className="space-y-2">
+            <div>
+              <label className="block text-xs text-gray-400 mb-0.5">Width (mm)</label>
+              <input type="number" step={50} min={100} value={selEl.widthMm}
+                className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500"
+                onChange={e => updateElement(selElRoom.id, selEl.id, { widthMm: parseInt(e.target.value) || selEl.widthMm })}/>
+            </div>
+            {selEl.type !== 'radiator' && (
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Height (mm)</label>
+                <input type="number" step={50} min={100} value={selEl.heightMm}
+                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500"
+                  onChange={e => updateElement(selElRoom.id, selEl.id, { heightMm: parseInt(e.target.value) || selEl.heightMm })}/>
+              </div>
+            )}
+            {selEl.type === 'window' && (
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">U-value (W/m²K)</label>
+                <input type="number" step={0.1} min={0.5} value={selEl.uValue || 2.0}
+                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500"
+                  onChange={e => updateElement(selElRoom.id, selEl.id, { uValue: parseFloat(e.target.value) || 2.0 })}/>
+              </div>
+            )}
+            <div className="text-xs text-gray-400 pt-1 border-t border-gray-100">
+              {selEl.widthMm}mm × {selEl.heightMm}mm
+              {selEl.type === 'window' && selEl.uValue ? ` · U${selEl.uValue} W/m²K` : ''}
+              {selEl.type === 'window' ? ` · Area: ${((selEl.widthMm * selEl.heightMm) / 1e6).toFixed(2)}m²` : ''}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wall type context menu */}
       {wallMenu && (() => {
         const room = rooms.find(r => r.id === wallMenu.roomId)
         const currentType = room?.wallTypes[wallMenu.wallIdx] || 'external'
@@ -731,22 +761,24 @@ const FloorPlanCanvas = forwardRef<CanvasRef, CanvasProps>(({
         const menuX = rect ? wallMenu.x - rect.left : wallMenu.x
         const menuY = rect ? wallMenu.y - rect.top : wallMenu.y
         return (
-          <div className="absolute bg-white border border-gray-200 rounded-xl shadow-lg py-1.5 z-50 min-w-[140px]"
-            style={{ left: Math.min(menuX, containerSize.w - 160), top: Math.min(menuY, containerSize.h - 180) }}>
-            <div className="px-3 py-1 text-xs font-medium text-gray-500 border-b border-gray-100 mb-1">Wall type</div>
+          <div className="absolute bg-white border border-gray-200 rounded-xl shadow-lg py-1.5 z-50 min-w-[150px]"
+            style={{ left: Math.min(menuX, containerSize.w - 170), top: Math.min(menuY, containerSize.h - 190) }}>
+            <div className="px-3 py-1 text-xs font-semibold text-gray-500 border-b border-gray-100 mb-1">Wall type</div>
             {WALL_TYPES.map(t => (
-              <button key={t} onClick={() => setWallType(wallMenu.roomId, wallMenu.wallIdx, t)}
+              <button key={t} onClick={() => {
+                onRoomsChange(rooms.map(r => r.id !== wallMenu.roomId ? r : {
+                  ...r, wallTypes: r.wallTypes.map((wt, i) => i === wallMenu.wallIdx ? t : wt)
+                }))
+                setWallMenu(null)
+              }}
                 className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-gray-50 transition-colors ${t === currentType ? 'text-emerald-700 font-semibold bg-emerald-50' : 'text-gray-700'}`}>
-                <svg width={16} height={6}><line x1={0} y1={3} x2={16} y2={3} stroke={WALL_COLORS[t]} strokeWidth={2} strokeDasharray={t==='internal'?'4,2':t==='party'?'8,3':t==='open'?'2,2':'none'}/></svg>
+                <svg width={16} height={6}><line x1={0} y1={3} x2={16} y2={3} stroke={WALL_COLORS[t]} strokeWidth={2} strokeDasharray={t === 'internal' ? '4,2' : t === 'party' ? '8,3' : t === 'open' ? '2,2' : 'none'}/></svg>
                 <span className="capitalize">{t} wall</span>
                 {t === currentType && <span className="ml-auto">✓</span>}
               </button>
             ))}
-            <div className="border-t border-gray-100 mt-1 pt-1">
-              <button onClick={() => { setWallMenu(null) }}
-                className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-50">
-                Cancel
-              </button>
+            <div className="border-t border-gray-100 mt-1">
+              <button onClick={() => setWallMenu(null)} className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-50">Cancel</button>
             </div>
           </div>
         )
