@@ -203,7 +203,7 @@ export type SharedWall = {
 
 export function detectAdjacency(
   rooms: Array<{ id: string; vertices: Polygon }>,
-  minOverlap = 100 // minimum 100mm overlap to count as shared wall
+  minOverlapFraction = 0.8
 ): SharedWall[] {
   const shared: SharedWall[] = []
   for (let i = 0; i < rooms.length; i++) {
@@ -215,11 +215,14 @@ export function detectAdjacency(
       for (let wA = 0; wA < nA; wA++) {
         const a1 = rA.vertices[wA]
         const a2 = rA.vertices[(wA + 1) % nA]
+        const lenA = vecDist(a1, a2)
         for (let wB = 0; wB < nB; wB++) {
           const b1 = rB.vertices[wB]
           const b2 = rB.vertices[(wB + 1) % nB]
+          const lenB = vecDist(b1, b2)
           const overlap = segmentOverlapLength(a1, a2, b1, b2)
-          if (overlap >= minOverlap) {
+          const shorter = Math.min(lenA, lenB)
+          if (shorter > 50 && overlap / shorter >= minOverlapFraction) {
             shared.push({ roomAId: rA.id, wallIndexA: wA, roomBId: rB.id, wallIndexB: wB, overlapLength: overlap })
           }
         }

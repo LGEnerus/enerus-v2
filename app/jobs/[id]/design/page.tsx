@@ -746,7 +746,7 @@ export default function DesignPage() {
             {rooms.length > 0 && (
               <div className="pt-2 border-t border-gray-100">
                 <a href={`/jobs/${jobId}/design/system`}
-                  onClick={async e => { e.preventDefault(); await save(); window.location.href = `/jobs/${jobId}` }}
+                  onClick={async e => { e.preventDefault(); await save(); window.location.href = `/jobs/${jobId}/design/system` }}
                   className="block w-full bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium py-2.5 rounded-lg text-center transition-colors">
                   Save & continue to system specification →
                 </a>
