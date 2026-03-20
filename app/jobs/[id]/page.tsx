@@ -330,12 +330,6 @@ export default function JobDetailPage() {
                   </>
                 )}
 
-                {activeStage === 'design' && getStageStatus(activeStage) !== 'locked' && (
-                  <a href={`/jobs/${jobId}/design`} className="text-xs text-emerald-700 hover:underline">
-                    {systemDesign ? 'Edit design →' : 'Open design tool →'}
-                  </a>
-                )}
-
                 {getStageStatus(activeStage) === 'locked' && (
                   <div className="text-xs text-gray-400 flex items-center gap-1.5">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
