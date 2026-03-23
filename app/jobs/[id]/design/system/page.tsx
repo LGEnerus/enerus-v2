@@ -6,7 +6,35 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { ULTRAHEAT_RADIATORS, radOutput } from '@/lib/radiators'
-import type { RoomData } from '@/app/jobs/[id]/design/page'
+
+// ─── RoomData type (canonical room record from design page) ──────────────────
+type RoomData = {
+  id: string
+  name: string
+  roomType: string
+  floor: number
+  lengthMm: number
+  widthMm: number
+  heightMm: number
+  areaMm2: number
+  extWallU: number
+  windowU: number
+  doorU: number
+  floorU: number
+  ceilingU: number
+  extWallAreaMm2: number
+  windowAreaMm2: number
+  doorAreaMm2: number
+  floorAdj: string
+  ceilingAdj: string
+  achOverride: number | null
+  hasOpenFlue: boolean
+  fabricLossW: number
+  ventLossW: number
+  totalLossW: number
+  canvasRoomId?: string
+}
+
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -192,7 +220,7 @@ export default function SystemSpecPage() {
   // ─── Computed values ──────────────────────────────────────────────────────────
 
   const deltaT = (system.flowTemp + system.returnTemp) / 2 - 21
-  const totalW = rooms.reduce((s, r) => s + r.totalLossW, 0)
+  const totalW = rooms.reduce((s: number, r: RoomSpec) => s + r.totalLossW, 0)
   const shl = totalFloorAreaM2 > 0 ? Math.round(totalW / totalFloorAreaM2) : 0
   const recKw = Math.ceil(totalW / 1000)
   const { spf, stars } = getSPF(shl, system.emitterType, system.flowTemp)
@@ -209,8 +237,8 @@ export default function SystemSpecPage() {
   const noiseOk = noiseLevel <= 37
   const minCylinder = numBedrooms <= 2 ? 150 : numBedrooms <= 3 ? 200 : numBedrooms <= 4 ? 250 : 300
 
-  const totalRadOutput = rooms.reduce((sum, room) =>
-    sum + room.selectedRadiators.reduce((rs, sr) => {
+  const totalRadOutput = rooms.reduce((sum: number, room: RoomSpec) =>
+    sum + room.selectedRadiators.reduce((rs: number, sr: {radiatorId: string; quantity: number}) => {
       const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
       return rs + (rad ? radOutput(rad, deltaT) * sr.quantity : 0)
     }, 0), 0)
@@ -388,7 +416,7 @@ export default function SystemSpecPage() {
             </div>
 
             {rooms.map(room => {
-              const roomRadOutput = room.selectedRadiators.reduce((s, sr) => {
+              const roomRadOutput = room.selectedRadiators.reduce((s: number, sr: {radiatorId: string; quantity: number}) => {
                 const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
                 return s + (rad ? radOutput(rad, deltaT) * sr.quantity : 0)
               }, 0)
@@ -483,7 +511,7 @@ export default function SystemSpecPage() {
                         <div>
                           <div className="text-xs font-semibold text-gray-700 mb-2">Selected radiators</div>
                           <div className="space-y-1.5">
-                            {room.selectedRadiators.map((sr, si) => {
+                            {room.selectedRadiators.map((sr: {radiatorId: string; quantity: number}, si: number) => {
                               const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
                               if (!rad) return null
                               const out = radOutput(rad, deltaT)
@@ -508,7 +536,7 @@ export default function SystemSpecPage() {
                                         updRoom(room.id, { selectedRadiators: rads })
                                       }}/>
                                     <button
-                                      onClick={() => updRoom(room.id, { selectedRadiators: room.selectedRadiators.filter((_,i) => i!==si) })}
+                                      onClick={() => updRoom(room.id, { selectedRadiators: room.selectedRadiators.filter((_: {radiatorId: string; quantity: number}, i: number) => i!==si) })}
                                       className="text-red-400 hover:text-red-600 text-sm">✕</button>
                                   </div>
                                 </div>
@@ -744,9 +772,9 @@ export default function SystemSpecPage() {
             </div>
 
             {/* Save + continue */}
-            <button onClick={() => save(`/jobs/${jobId}`)} disabled={saving}
+            <button onClick={() => save(`/jobs/${jobId}/design/heatpump`)} disabled={saving}
               className="w-full bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-semibold py-3 rounded-xl transition-colors">
-              {saving ? 'Saving...' : 'Save & return to job →'}
+              {saving ? 'Saving...' : 'Save Save & return to job → continue to heat pump selection →'}
             </button>
           </div>
         </div>
