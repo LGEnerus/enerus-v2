@@ -197,13 +197,18 @@ type Props = {
   onRoomsChange: (rooms: CanvasRoom[]) => void
   onSelect: (id: string | null, type?: 'room' | 'element', elementId?: string) => void
   onToolChange: (tool: CanvasTool) => void
+  drawingInsulFloor: number | null
+  drawingInsulType: 'floor' | 'ceiling'
+  insulRegions: Array<{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling'}>
+  onInsulRegionAdd: (r:{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling'}) => void
+  insulLayerDefaultU: (f:number) => number
   selectedId: string | null
   selectedElementId: string | null
 }
 
 const DesignCanvas = forwardRef<CanvasRef, Props>(({
   rooms, activeFloor, tool, gridMm, showGrid, showDims, showHeatLoss,
-  bgImage, onRoomsChange, onSelect, onToolChange, selectedId, selectedElementId,
+  bgImage, onRoomsChange, onSelect, onToolChange, drawingInsulFloor, drawingInsulType, insulRegions, onInsulRegionAdd, insulLayerDefaultU, selectedId, selectedElementId,
 }, ref) => {
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -560,15 +565,14 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         const y1 = Math.min(drawStart.y, drawCurrent.y)
         const x2 = Math.max(drawStart.x, drawCurrent.x)
         const y2 = Math.max(drawStart.y, drawCurrent.y)
-        setInsulRegions(prev => [...prev, {
+        onInsulRegionAdd({
           id: `insul_${Date.now()}`,
-          floor: drawingInsulFloor,
+          floor: drawingInsulFloor!,
           vertices: [{ x:x1,y:y1 }, { x:x2,y:y1 }, { x:x2,y:y2 }, { x:x1,y:y2 }],
-          uValue: insulLayers.find(il => il.betweenFloors[1] === drawingInsulFloor || il.betweenFloors[0] === drawingInsulFloor)?.uValue || 0.25,
+          uValue: insulLayerDefaultU(drawingInsulFloor!),
           type: drawingInsulType,
-        }])
+        })
         onToolChange('select')
-        setDrawingInsulFloor(null)
       }
       setDrawStart(null)
       setDrawCurrent(null)
@@ -1463,7 +1467,12 @@ export default function DesignPage() {
             bgImage={bgImage}
             onRoomsChange={handleRoomsChange}
             onSelect={handleSelect}
-            onToolChange={setTool}
+            onToolChange={(t) => { setTool(t); if (t === 'select') setDrawingInsulFloor(null); }}
+            drawingInsulFloor={drawingInsulFloor}
+            drawingInsulType={drawingInsulType}
+            insulRegions={insulRegions}
+            onInsulRegionAdd={r => setInsulRegions(prev => [...prev, r])}
+            insulLayerDefaultU={f => insulLayers.find(il => il.betweenFloors[1] === f || il.betweenFloors[0] === f)?.uValue || 0.25}
             selectedId={selectedId}
             selectedElementId={selectedElementId}
           />
