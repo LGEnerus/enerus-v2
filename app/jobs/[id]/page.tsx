@@ -298,14 +298,58 @@ export default function JobDetailPage() {
                 ))}
               </div>
 
-              {/* Design stage shows design summary if saved */}
+              {/* Design stage — rich summary card */}
               {activeStage === 'design' && systemDesign && (
-                <div className="bg-white border border-emerald-200 rounded-lg p-3 mb-3 grid grid-cols-5 gap-3 text-xs">
-                  <div><div className="text-gray-400">Heat loss</div><div className="font-semibold">{(systemDesign.total_heat_loss_w / 1000).toFixed(1)} kW</div></div>
-                  <div><div className="text-gray-400">ASHP size</div><div className="font-semibold text-emerald-700">{systemDesign.recommended_hp_kw} kW</div></div>
-                  <div><div className="text-gray-400">Flow temp</div><div className="font-semibold">{systemDesign.flow_temp_c}°C</div></div>
-                  <div><div className="text-gray-400">SPF</div><div className="font-semibold">{systemDesign.spf_estimate}</div></div>
-                  <div><div className="text-gray-400">Stars</div><div className="font-semibold">{'★'.repeat(systemDesign.star_rating || 0)}</div></div>
+                <div className="mb-3 space-y-2">
+                  {/* Heat loss + system */}
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+                    <div className="text-xs font-semibold text-emerald-800 mb-2">System design summary</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                      <div><div className="text-emerald-600">Heat loss</div><div className="font-bold text-base text-gray-900">{(systemDesign.total_heat_loss_w / 1000).toFixed(2)} kW</div></div>
+                      <div><div className="text-emerald-600">Recommended HP</div><div className="font-bold text-base text-emerald-700">{systemDesign.recommended_hp_kw} kW min</div></div>
+                      <div><div className="text-emerald-600">Flow temp</div><div className="font-bold text-gray-900">{systemDesign.flow_temp_c}°C / {systemDesign.design_inputs?.systemSpec?.returnTemp || 40}°C</div></div>
+                      <div><div className="text-emerald-600">MCS 031 SPF</div><div className="font-bold text-gray-900">{systemDesign.spf_estimate} <span className="text-amber-400">{'★'.repeat(systemDesign.star_rating || 0)}</span></div></div>
+                    </div>
+                    {systemDesign.design_inputs?.systemSpec?.hpModel && (
+                      <div className="mt-3 pt-3 border-t border-emerald-200 grid grid-cols-2 gap-3 text-xs">
+                        <div><div className="text-emerald-600">Heat pump</div><div className="font-semibold text-gray-900">{systemDesign.design_inputs.systemSpec.hpManufacturer} {systemDesign.design_inputs.systemSpec.hpModel}</div></div>
+                        <div><div className="text-emerald-600">Cylinder</div><div className="font-semibold text-gray-900">{systemDesign.design_inputs.systemSpec.cylinderManufacturer || '—'} {systemDesign.design_inputs.systemSpec.cylinderModel || '—'}</div></div>
+                      </div>
+                    )}
+                    {/* Noise result */}
+                    {systemDesign.noise_level_db && (
+                      <div className={`mt-2 text-xs px-2 py-1 rounded-lg inline-block ${systemDesign.noise_compliant ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                        MCS 020(a) noise: {systemDesign.noise_level_db} dB {systemDesign.noise_compliant ? '✓ Compliant' : '✗ Non-compliant'}
+                      </div>
+                    )}
+                  </div>
+                  {/* Design tool links */}
+                  <div className="flex flex-wrap gap-2">
+                    <a href={`/jobs/${jobId}/design`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
+                      ✏ Edit floor plan
+                    </a>
+                    <a href={`/jobs/${jobId}/design/system`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
+                      🔥 Radiators
+                    </a>
+                    <a href={`/jobs/${jobId}/design/heatpump`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
+                      ⚡ Heat pump
+                    </a>
+                    <a href={`/jobs/${jobId}/design/cylinder`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
+                      💧 Cylinder
+                    </a>
+                    <a href={`/jobs/${jobId}/noise`} className="text-xs text-gray-600 hover:underline border border-gray-200 px-3 py-1.5 rounded-lg bg-white">
+                      🔊 Noise assessment
+                    </a>
+                    <a href={`/api/proposal/${jobId}`} target="_blank" className="text-xs bg-emerald-700 text-white hover:bg-emerald-800 px-3 py-1.5 rounded-lg font-medium">
+                      📄 View proposal →
+                    </a>
+                  </div>
+                </div>
+              )}
+              {/* No design yet */}
+              {activeStage === 'design' && !systemDesign && getStageStatus(activeStage) === 'in_progress' && (
+                <div className="mb-3 bg-gray-50 border border-gray-200 rounded-xl p-4 text-xs text-gray-500">
+                  No design started yet. Use the design tool to calculate heat loss and specify the system.
                 </div>
               )}
 

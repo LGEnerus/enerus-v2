@@ -2,12 +2,9 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { ULTRAHEAT_RADIATORS, radOutput, type Radiator } from '@/lib/radiators'
-import FloorPlanCanvas, { type CanvasRoom, type CanvasTool } from '@/components/FloorPlanCanvas'
-import { polygonAreaM2, rectFromDimensions, detectAdjacency, autoWallTypes } from '@/lib/canvas-geometry'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -29,205 +26,438 @@ const DESIGN_TEMPS: Record<string, { temp: number; label: string }> = {
   'Nottingham': { temp: -4.0, label: 'Nottingham / E Midlands' },
 }
 
-const ROOM_TEMPS: Record<string, number> = {
-  'Living room': 21, 'Dining room': 21, 'Kitchen': 18, 'Bedroom': 18,
-  'Bathroom': 22, 'En-suite': 22, 'Hall / Landing': 18, 'Study': 21,
-  'Utility room': 16, 'WC': 18, 'Conservatory': 21, 'Garage': 10, 'Other': 18,
-}
+const ROOM_TYPES: Array<{
+  type: string; icon: string; defaultTemp: number; defaultAch: number; color: string
+}> = [
+  { type: 'Living room',    icon: '🛋',  defaultTemp: 21, defaultAch: 1.5, color: '#d1fae5' },
+  { type: 'Dining room',   icon: '🍽',  defaultTemp: 21, defaultAch: 1.5, color: '#dbeafe' },
+  { type: 'Kitchen',       icon: '🍳',  defaultTemp: 18, defaultAch: 2.0, color: '#fef3c7' },
+  { type: 'Bedroom',       icon: '🛏',  defaultTemp: 18, defaultAch: 1.0, color: '#ede9fe' },
+  { type: 'Bathroom',      icon: '🚿',  defaultTemp: 22, defaultAch: 2.0, color: '#fce7f3' },
+  { type: 'En-suite',      icon: '🛁',  defaultTemp: 22, defaultAch: 2.0, color: '#fce7f3' },
+  { type: 'Hall / Landing',icon: '🚪',  defaultTemp: 18, defaultAch: 1.5, color: '#f3f4f6' },
+  { type: 'Study',         icon: '💻',  defaultTemp: 21, defaultAch: 1.5, color: '#d1fae5' },
+  { type: 'Utility room',  icon: '🧺',  defaultTemp: 16, defaultAch: 2.0, color: '#fef9c3' },
+  { type: 'WC',            icon: '🚽',  defaultTemp: 18, defaultAch: 2.0, color: '#fce7f3' },
+  { type: 'Conservatory',  icon: '🌿',  defaultTemp: 21, defaultAch: 1.5, color: '#ecfdf5' },
+  { type: 'Garage',        icon: '🚗',  defaultTemp: 10, defaultAch: 0.5, color: '#f9fafb' },
+  { type: 'Other',         icon: '📦',  defaultTemp: 18, defaultAch: 1.5, color: '#f3f4f6' },
+]
 
-const ROOM_ACH: Record<string, number> = {
-  'Living room': 1.5, 'Dining room': 1.5, 'Kitchen': 2.0, 'Bedroom': 1.0,
-  'Bathroom': 2.0, 'En-suite': 2.0, 'Hall / Landing': 1.5, 'Study': 1.5,
-  'Utility room': 2.0, 'WC': 2.0, 'Conservatory': 1.5, 'Garage': 0.5, 'Other': 1.5,
-}
+const WALL_PRESETS = [
+  { id: 'solid_unins',  label: 'Solid brick — uninsulated',        u: 2.1  },
+  { id: 'solid_ext',    label: 'Solid brick — ext insulation',     u: 0.29 },
+  { id: 'solid_int',    label: 'Solid brick — int insulation',     u: 0.27 },
+  { id: 'cavity_unins', label: 'Cavity — uninsulated',             u: 1.5  },
+  { id: 'cavity_min',   label: 'Cavity — full fill mineral wool',  u: 0.33 },
+  { id: 'cavity_pir',   label: 'Cavity — partial fill 50mm PIR',  u: 0.25 },
+  { id: 'timber_frame', label: 'Timber frame — 140mm mineral',     u: 0.22 },
+  { id: 'new_build',    label: 'Modern new build (post 2012)',      u: 0.18 },
+]
 
-const WALL_PRESETS: Record<string, { label: string; u: number }> = {
-  'solid_brick_unins':   { label: 'Solid brick — uninsulated (2.1)', u: 2.1 },
-  'solid_brick_ext_ins': { label: 'Solid brick — ext insulation 75mm (0.29)', u: 0.29 },
-  'solid_brick_int_ins': { label: 'Solid brick — int insulation 75mm (0.27)', u: 0.27 },
-  'cavity_unins':        { label: 'Cavity wall — uninsulated (1.5)', u: 1.5 },
-  'cavity_full_mineral': { label: 'Cavity — full fill mineral wool (0.33)', u: 0.33 },
-  'cavity_partial_pir':  { label: 'Cavity — partial fill 50mm PIR (0.25)', u: 0.25 },
-  'timber_frame_ins':    { label: 'Timber frame — 140mm mineral (0.22)', u: 0.22 },
-  'modern_new_build':    { label: 'Modern new build post-2012 (0.18)', u: 0.18 },
-  'custom':              { label: 'Custom U-value', u: 0 },
-}
+const WINDOW_PRESETS = [
+  { id: 'single',      label: 'Single glazed',              u: 4.8 },
+  { id: 'secondary',   label: 'Secondary glazed',           u: 2.4 },
+  { id: 'dbl_old',     label: 'Double glazed pre-2002',     u: 2.8 },
+  { id: 'dbl_new',     label: 'Double glazed post-2002',    u: 2.0 },
+  { id: 'dbl_lowe',    label: 'Double glazed low-E',        u: 1.4 },
+  { id: 'triple',      label: 'Triple glazed',              u: 0.8 },
+]
 
-const WINDOW_PRESETS: Record<string, { label: string; u: number }> = {
-  'single':          { label: 'Single glazed (4.8)', u: 4.8 },
-  'secondary':       { label: 'Secondary glazed (2.4)', u: 2.4 },
-  'double_pre2002':  { label: 'Double glazed pre-2002 (2.8)', u: 2.8 },
-  'double_post2002': { label: 'Double glazed post-2002 (2.0)', u: 2.0 },
-  'double_low_e':    { label: 'Double glazed low-E (1.4)', u: 1.4 },
-  'triple':          { label: 'Triple glazed (0.8)', u: 0.8 },
-}
+const FLOOR_PRESETS = [
+  { id: 'ground_unins',   label: 'Solid — uninsulated',        u: 0.70 },
+  { id: 'ground_50pir',   label: 'Solid — 50mm PIR',           u: 0.36 },
+  { id: 'ground_100pir',  label: 'Solid — 100mm PIR',          u: 0.20 },
+  { id: 'suspended',      label: 'Suspended timber — uninsulated', u: 0.70 },
+  { id: 'susp_insul',     label: 'Suspended — 100mm mineral',  u: 0.28 },
+  { id: 'ufh_screed',     label: 'UFH screed — insulated',     u: 0.18 },
+  { id: 'heated_below',   label: 'Heated space below',         u: 0.0  },
+]
+
+const CEILING_PRESETS = [
+  { id: 'heated_above',   label: 'Heated room above',          u: 0.0  },
+  { id: 'pitched_none',   label: 'Pitched — no insulation',    u: 2.0  },
+  { id: 'pitched_100',    label: 'Pitched — 100mm insulation', u: 0.25 },
+  { id: 'pitched_150',    label: 'Pitched — 150mm insulation', u: 0.16 },
+  { id: 'pitched_200',    label: 'Pitched — 200mm insulation', u: 0.13 },
+  { id: 'flat_insul',     label: 'Flat roof — insulated',      u: 0.18 },
+]
+
+const ROOM_SHAPES = [
+  { id: 'rect',    label: 'Rectangle',    icon: '▭' },
+  { id: 'l_tl',   label: 'L-shape ↖',    icon: '⌐' },
+  { id: 'l_tr',   label: 'L-shape ↗',    icon: '¬' },
+  { id: 'l_bl',   label: 'L-shape ↙',    icon: 'L' },
+  { id: 'l_br',   label: 'L-shape ↘',    icon: '⌐' },
+  { id: 'bay',    label: 'Bay window',   icon: '⬡' },
+]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type DesignRoute = 'selector' | 'list' | 'canvas' | 'upload'
+type RoomShape = 'rect' | 'l_tl' | 'l_tr' | 'l_bl' | 'l_br' | 'bay'
 
-// This is the canonical room type — used everywhere
+type FloorAdj = 'ground' | 'heated' | 'unheated' | 'outside'
+type CeilAdj  = 'heated' | 'roof' | 'unheated'
 
-type DesignSettings = {
-  location: string
-  designTempExt: number
-  totalFloorAreaM2: number
-  numBedrooms: number
-  defaultWallPreset: string
-  defaultWindowPreset: string
-}
-
-type RoomData = {
+type Room = {
   id: string
   name: string
   roomType: string
   floor: number
+  shape: RoomShape
+  // Dimensions in mm
   lengthMm: number
   widthMm: number
   heightMm: number
-  areaMm2: number
-  extWallU: number
-  windowU: number
-  doorU: number
-  floorU: number
-  ceilingU: number
-  extWallAreaMm2: number
-  windowAreaMm2: number
-  doorAreaMm2: number
-  floorAdj: string
-  ceilingAdj: string
+  // For L-shapes: cut dimensions
+  cutLengthMm: number
+  cutWidthMm: number
+  // Fabric
+  wallPreset: string
+  wallUCustom: number
+  windowPreset: string
+  windowUCustom: number
+  windowAreaM2: number  // override auto-estimate
+  extDoorAreaM2: number
+  floorPreset: string
+  floorUCustom: number
+  ceilingPreset: string
+  ceilingUCustom: number
+  // Thermal
+  floorAdj: FloorAdj
+  ceilAdj: CeilAdj
+  designTempC: number
   achOverride: number | null
   hasOpenFlue: boolean
-  fabricLossW: number
-  ventLossW: number
-  totalLossW: number
-  canvasRoomId?: string
+  // Calculated
+  areaMm2: number
+  fabricW: number
+  ventW: number
+  totalW: number
+  // Position on floor plan (set by drag or auto-layout)
+  planX: number
+  planY: number
 }
 
-function calcRoomLoss(room: RoomData, designTempExt: number): RoomData {
-  const roomTemp = ROOM_TEMPS[room.roomType] || 21
-  const dT = roomTemp - designTempExt
-  const area = room.areaMm2 > 0 ? room.areaMm2 / 1e6 : (room.lengthMm * room.widthMm) / 1e6
-  const extWallArea = room.extWallAreaMm2 > 0 ? room.extWallAreaMm2 / 1e6 : area * 1.5
-  const windowArea = room.windowAreaMm2 > 0 ? room.windowAreaMm2 / 1e6 : area * 0.15
-  const doorArea = room.doorAreaMm2 / 1e6
-  const floorAdjTemp = room.floorAdj === 'ground' ? 10 : room.floorAdj === 'heated' ? roomTemp : room.floorAdj === 'unheated' ? (roomTemp + designTempExt) / 2 : designTempExt
-  const ceilAdjTemp = room.ceilingAdj === 'roof' ? designTempExt : room.ceilingAdj === 'unheated' ? (roomTemp + designTempExt) / 2 : room.ceilingAdj === 'outside' ? designTempExt : roomTemp
-  const openFlueACH = room.hasOpenFlue ? 1.5 : 0
-  const ach = (room.achOverride !== null ? room.achOverride : (ROOM_ACH[room.roomType] || 1.5)) + openFlueACH
-  const volume = area * (room.heightMm / 1000)
+type BuildingSettings = {
+  location: string
+  designTempExt: number
+  totalFloorAreaM2: number
+  numBedrooms: number
+  numFloors: number
+  defaultWallPreset: string
+  defaultWindowPreset: string
+  defaultFloorPreset: string
+}
 
-  const fabricLoss =
-    Math.max(0, extWallArea - windowArea - doorArea) * room.extWallU * dT +
-    windowArea * room.windowU * dT +
-    doorArea * room.doorU * dT +
-    area * room.floorU * (roomTemp - floorAdjTemp) +
-    (room.ceilingAdj !== 'heated' ? area * room.ceilingU * (roomTemp - ceilAdjTemp) : 0)
+type ViewMode = 'rooms' | 'floorplan' | 'upload'
 
-  const ventLoss = 0.33 * ach * volume * dT
+// ─── Geometry helpers ─────────────────────────────────────────────────────────
+
+function roomArea(r: Room): number {
+  const lm = r.lengthMm / 1000, wm = r.widthMm / 1000
+  const cl = r.cutLengthMm / 1000, cw = r.cutWidthMm / 1000
+  if (r.shape === 'rect' || r.shape === 'bay') return lm * wm
+  return lm * wm - cl * cw
+}
+
+function calcRoom(r: Room, extTemp: number): Room {
+  const area = roomArea(r)
+  const roomTemp = r.designTempC
+  const dT = roomTemp - extTemp
+  if (dT <= 0) return { ...r, areaMm2: area * 1e6, fabricW: 0, ventW: 0, totalW: 0 }
+
+  // Wall U-value
+  const wallU = r.wallPreset === 'custom'
+    ? r.wallUCustom
+    : (WALL_PRESETS.find(p => p.id === r.wallPreset)?.u || 1.5)
+
+  // Window U-value
+  const winU = r.windowPreset === 'custom'
+    ? r.windowUCustom
+    : (WINDOW_PRESETS.find(p => p.id === r.windowPreset)?.u || 2.0)
+
+  // Window area: if overridden use that, else estimate 15% of floor area
+  const winArea = r.windowAreaM2 > 0 ? r.windowAreaM2 : area * 0.15
+  const doorArea = r.extDoorAreaM2
+
+  // Perimeter wall area (external walls only, estimated at height)
+  const perim = (r.lengthMm + r.widthMm) * 2 / 1000
+  const extWallGross = perim * (r.heightMm / 1000)
+  const extWallNet = Math.max(0, extWallGross - winArea - doorArea)
+
+  // Floor
+  const floorU = r.floorPreset === 'custom'
+    ? r.floorUCustom
+    : (FLOOR_PRESETS.find(p => p.id === r.floorPreset)?.u || 0.45)
+  const floorAdjTemp = r.floorAdj === 'ground' ? 10
+    : r.floorAdj === 'heated' ? roomTemp
+    : r.floorAdj === 'unheated' ? (roomTemp + extTemp) / 2
+    : extTemp
+
+  // Ceiling
+  const ceilU = r.ceilingPreset === 'custom'
+    ? r.ceilingUCustom
+    : (CEILING_PRESETS.find(p => p.id === r.ceilingPreset)?.u || 0.25)
+  const ceilAdjTemp = r.ceilAdj === 'heated' ? roomTemp
+    : r.ceilAdj === 'unheated' ? (roomTemp + extTemp) / 2
+    : extTemp
+
+  const fabricW = Math.max(0,
+    extWallNet * wallU * dT +
+    winArea * winU * dT +
+    doorArea * 3.0 * dT +
+    area * floorU * (roomTemp - floorAdjTemp) +
+    (r.ceilAdj !== 'heated' ? area * ceilU * (roomTemp - ceilAdjTemp) : 0)
+  )
+
+  // Ventilation
+  const baseAch = ROOM_TYPES.find(rt => rt.type === r.roomType)?.defaultAch || 1.5
+  const ach = (r.achOverride !== null ? r.achOverride : baseAch) + (r.hasOpenFlue ? 1.5 : 0)
+  const volume = area * (r.heightMm / 1000)
+  const ventW = Math.max(0, 0.33 * ach * volume * dT)
 
   return {
-    ...room,
-    fabricLossW: Math.round(Math.max(0, fabricLoss)),
-    ventLossW: Math.round(Math.max(0, ventLoss)),
-    totalLossW: Math.round(Math.max(0, fabricLoss + ventLoss)),
+    ...r,
+    areaMm2: area * 1e6,
+    fabricW: Math.round(fabricW),
+    ventW: Math.round(ventW),
+    totalW: Math.round(fabricW + ventW),
   }
 }
 
-function makeRoom(id: string, settings: DesignSettings): RoomData {
+function makeRoom(floor: number, settings: BuildingSettings): Room {
+  const rt = ROOM_TYPES[0]
   return {
-    id, name: '', roomType: 'Living room', floor: 0,
-    lengthMm: 4000, widthMm: 3500, heightMm: 2400, areaMm2: 0,
-    extWallU: WALL_PRESETS[settings.defaultWallPreset]?.u || 1.5,
-    windowU: WINDOW_PRESETS[settings.defaultWindowPreset]?.u || 2.0,
-    doorU: 3.0, floorU: 0.45, ceilingU: 0.25,
-    extWallAreaMm2: 0, windowAreaMm2: 0, doorAreaMm2: 0,
-    floorAdj: 'ground', ceilingAdj: 'heated',
-    achOverride: null, hasOpenFlue: false,
-    fabricLossW: 0, ventLossW: 0, totalLossW: 0,
+    id: `r_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+    name: '', roomType: rt.type, floor,
+    shape: 'rect',
+    lengthMm: 4000, widthMm: 3500, heightMm: 2400,
+    cutLengthMm: 1500, cutWidthMm: 1500,
+    wallPreset: settings.defaultWallPreset,
+    wallUCustom: 1.5,
+    windowPreset: settings.defaultWindowPreset,
+    windowUCustom: 2.0,
+    windowAreaM2: 0,
+    extDoorAreaM2: 0,
+    floorPreset: settings.defaultFloorPreset,
+    floorUCustom: 0.45,
+    ceilingPreset: floor === 0 ? 'pitched_100' : 'heated_above',
+    ceilingUCustom: 0.25,
+    floorAdj: floor === 0 ? 'ground' : 'heated',
+    ceilAdj: 'heated',
+    designTempC: rt.defaultTemp,
+    achOverride: null,
+    hasOpenFlue: false,
+    areaMm2: 0, fabricW: 0, ventW: 0, totalW: 0,
+    planX: 0, planY: 0,
   }
 }
 
-const defaultSettings: DesignSettings = {
+const defaultSettings: BuildingSettings = {
   location: 'Birmingham', designTempExt: -4,
-  totalFloorAreaM2: 85, numBedrooms: 3,
-  defaultWallPreset: 'cavity_unins', defaultWindowPreset: 'double_post2002',
+  totalFloorAreaM2: 85, numBedrooms: 3, numFloors: 2,
+  defaultWallPreset: 'cavity_unins',
+  defaultWindowPreset: 'dbl_new',
+  defaultFloorPreset: 'ground_unins',
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Floor plan renderer ──────────────────────────────────────────────────────
 
-export default function DesignPage() {
+function FloorPlanPreview({ rooms, activeFloor, selectedId, onSelect, totalW }: {
+  rooms: Room[]
+  activeFloor: number
+  selectedId: string | null
+  onSelect: (id: string) => void
+  totalW: number
+}) {
+  const SCALE = 0.05  // mm → px (50px per metre)
+  const PAD = 20
+  const floorRooms = rooms.filter(r => r.floor === activeFloor)
+  const ghostRooms = rooms.filter(r => r.floor === activeFloor - 1)
+
+  // Auto-layout: place rooms in a grid if no positions set
+  let x = PAD, y = PAD
+  const positioned = floorRooms.map((r, i) => {
+    const pr = { ...r }
+    if (pr.planX === 0 && pr.planY === 0) {
+      pr.planX = x
+      pr.planY = y
+      x += r.lengthMm * SCALE + 8
+      if (x > 400) { x = PAD; y += r.widthMm * SCALE + 8 }
+    }
+    return pr
+  })
+
+  const maxX = Math.max(400, ...positioned.map(r => r.planX + r.lengthMm * SCALE)) + PAD
+  const maxY = Math.max(300, ...positioned.map(r => r.planY + r.widthMm * SCALE)) + PAD
+
+  function getRoomColor(r: Room): string {
+    if (r.id === selectedId) return '#d1fae5'
+    const wpm2 = r.areaMm2 > 0 ? r.totalW / (r.areaMm2 / 1e6) : 0
+    if (wpm2 === 0) return '#f9fafb'
+    if (wpm2 < 40) return '#d1fae5'
+    if (wpm2 < 70) return '#fef9c3'
+    if (wpm2 < 100) return '#fed7aa'
+    return '#fecaca'
+  }
+
+  function getRoomPath(r: Room, x: number, y: number): string {
+    const l = r.lengthMm * SCALE, w = r.widthMm * SCALE
+    const cl = r.cutLengthMm * SCALE, cw = r.cutWidthMm * SCALE
+    switch (r.shape) {
+      case 'l_tl': return `M${x+cl},${y} L${x+l},${y} L${x+l},${y+w} L${x},${y+w} L${x},${y+cw} L${x+cl},${y+cw} Z`
+      case 'l_tr': return `M${x},${y} L${x+l-cl},${y} L${x+l-cl},${y+cw} L${x+l},${y+cw} L${x+l},${y+w} L${x},${y+w} Z`
+      case 'l_bl': return `M${x},${y} L${x+l},${y} L${x+l},${y+w} L${x+cl},${y+w} L${x+cl},${y+w-cw} L${x},${y+w-cw} Z`
+      case 'l_br': return `M${x},${y} L${x+l},${y} L${x+l},${y+w-cw} L${x+l-cl},${y+w-cw} L${x+l-cl},${y+w} L${x},${y+w} Z`
+      default: return `M${x},${y} L${x+l},${y} L${x+l},${y+w} L${x},${y+w} Z`
+    }
+  }
+
+  return (
+    <div className="relative">
+      <svg width={maxX} height={maxY} className="bg-white rounded-xl border border-gray-200"
+        style={{ maxWidth: '100%' }}>
+        {/* Ghost layer — floor below */}
+        {ghostRooms.map(r => (
+          <path key={`ghost_${r.id}`}
+            d={getRoomPath(r, r.planX || PAD, r.planY || PAD)}
+            fill="none" stroke="#e5e7eb" strokeWidth={1} strokeDasharray="4,3" opacity={0.5}/>
+        ))}
+
+        {/* Grid */}
+        {Array.from({ length: Math.floor(maxX / 50) }, (_, i) => (
+          <line key={`gx${i}`} x1={i*50} y1={0} x2={i*50} y2={maxY} stroke="#f3f4f6" strokeWidth={0.5}/>
+        ))}
+        {Array.from({ length: Math.floor(maxY / 50) }, (_, i) => (
+          <line key={`gy${i}`} x1={0} y1={i*50} x2={maxX} y2={i*50} stroke="#f3f4f6" strokeWidth={0.5}/>
+        ))}
+
+        {/* Rooms */}
+        {positioned.map(r => {
+          const px = r.planX, py = r.planY
+          const l = r.lengthMm * SCALE, w = r.widthMm * SCALE
+          const cx = px + l / 2, cy = py + w / 2
+          const isSel = r.id === selectedId
+          const lblSize = Math.max(7, Math.min(11, l * 0.12))
+          return (
+            <g key={r.id} onClick={() => onSelect(r.id)} style={{ cursor: 'pointer' }}>
+              <path d={getRoomPath(r, px, py)}
+                fill={getRoomColor(r)}
+                stroke={isSel ? '#059669' : '#9ca3af'}
+                strokeWidth={isSel ? 2 : 1}/>
+              {l > 30 && w > 20 && (
+                <text x={cx} y={cy - (r.totalW > 0 ? lblSize * 0.5 : 0)}
+                  textAnchor="middle" dominantBaseline="middle"
+                  fontSize={lblSize} fill={isSel ? '#065f46' : '#374151'}
+                  fontWeight={isSel ? '700' : '400'}
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                  {r.name || r.roomType}
+                </text>
+              )}
+              {r.totalW > 0 && l > 30 && w > 20 && (
+                <text x={cx} y={cy + lblSize * 0.8}
+                  textAnchor="middle" dominantBaseline="middle"
+                  fontSize={lblSize * 0.85} fill="#059669"
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                  {r.totalW}W
+                </text>
+              )}
+              {/* Dimensions */}
+              {isSel && (
+                <>
+                  <text x={px + l/2} y={py - 4} textAnchor="middle" fontSize={8} fill="#6b7280" fontFamily="monospace">
+                    {r.lengthMm >= 1000 ? `${(r.lengthMm/1000).toFixed(2)}m` : `${r.lengthMm}mm`}
+                  </text>
+                  <text x={px - 4} y={py + w/2} textAnchor="middle" fontSize={8} fill="#6b7280" fontFamily="monospace"
+                    transform={`rotate(-90, ${px-4}, ${py+w/2})`}>
+                    {r.widthMm >= 1000 ? `${(r.widthMm/1000).toFixed(2)}m` : `${r.widthMm}mm`}
+                  </text>
+                </>
+              )}
+            </g>
+          )
+        })}
+
+        {/* Scale bar */}
+        <g transform={`translate(${maxX - 80}, ${maxY - 20})`}>
+          <line x1={0} y1={0} x2={50} y2={0} stroke="#374151" strokeWidth={1.5}/>
+          <line x1={0} y1={-3} x2={0} y2={3} stroke="#374151" strokeWidth={1.5}/>
+          <line x1={50} y1={-3} x2={50} y2={3} stroke="#374151" strokeWidth={1.5}/>
+          <text x={25} y={-6} textAnchor="middle" fontSize={8} fill="#374151" fontFamily="monospace">1m</text>
+        </g>
+      </svg>
+    </div>
+  )
+}
+
+// ─── Room shape picker ────────────────────────────────────────────────────────
+
+function ShapePreview({ shape, l, w, cl, cw }: { shape: RoomShape; l: number; w: number; cl: number; cw: number }) {
+  const S = 50, pad = 4
+  const scale = (S - pad * 2) / Math.max(l, w)
+  const ls = l * scale, ws = w * scale
+  const cls = cl * scale, cws = cw * scale
+  const ox = pad + (S - pad*2 - ls) / 2, oy = pad + (S - pad*2 - ws) / 2
+
+  let path = ''
+  switch (shape) {
+    case 'rect': path = `M${ox},${oy} L${ox+ls},${oy} L${ox+ls},${oy+ws} L${ox},${oy+ws} Z`; break
+    case 'l_tl': path = `M${ox+cls},${oy} L${ox+ls},${oy} L${ox+ls},${oy+ws} L${ox},${oy+ws} L${ox},${oy+cws} L${ox+cls},${oy+cws} Z`; break
+    case 'l_tr': path = `M${ox},${oy} L${ox+ls-cls},${oy} L${ox+ls-cls},${oy+cws} L${ox+ls},${oy+cws} L${ox+ls},${oy+ws} L${ox},${oy+ws} Z`; break
+    case 'l_bl': path = `M${ox},${oy} L${ox+ls},${oy} L${ox+ls},${oy+ws} L${ox+cls},${oy+ws} L${ox+cls},${oy+ws-cws} L${ox},${oy+ws-cws} Z`; break
+    case 'l_br': path = `M${ox},${oy} L${ox+ls},${oy} L${ox+ls},${oy+ws-cws} L${ox+ls-cls},${oy+ws-cws} L${ox+ls-cls},${oy+ws} L${ox},${oy+ws} Z`; break
+    case 'bay':  path = `M${ox},${oy} L${ox+ls},${oy} L${ox+ls},${oy+ws*0.6} L${ox+ls*0.75},${oy+ws} L${ox+ls*0.25},${oy+ws} L${ox},${oy+ws*0.6} Z`; break
+  }
+  return (
+    <svg width={S} height={S}>
+      <path d={path} fill="#d1fae5" stroke="#059669" strokeWidth={1.5}/>
+    </svg>
+  )
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
+export default function DesignToolV2() {
   const params = useParams()
   const jobId = params.id as string
-  const canvasRef = useRef<any>(null)
-  const roomRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
-  // Core state
-  const [route, setRoute] = useState<DesignRoute>('selector')
-  const [settings, setSettings] = useState<DesignSettings>(defaultSettings)
-  const [rooms, setRooms] = useState<RoomData[]>([])
-  const [canvasRooms, setCanvasRooms] = useState<CanvasRoom[]>([])
+  const [view, setView] = useState<ViewMode>('rooms')
+  const [settings, setSettings] = useState<BuildingSettings>(defaultSettings)
+  const [rooms, setRooms] = useState<Room[]>([])
   const [activeFloor, setActiveFloor] = useState(0)
-  const [canvasTool, setCanvasTool] = useState<CanvasTool>('select')
-  const [selectedCanvasRoom, setSelectedCanvasRoom] = useState<string | null>(null)
-  const [gridMm, setGridMm] = useState(100)
-  const [showGrid, setShowGrid] = useState(true)
-  const [showDimensions, setShowDimensions] = useState(true)
-  const [uploadImage, setUploadImage] = useState<string | null>(null)
-
-  // UI state
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [addingRoom, setAddingRoom] = useState(false)
+  const [addFloor, setAddFloor] = useState(0)
   const [customer, setCustomer] = useState<any>(null)
   const [existingDesign, setExistingDesign] = useState<any>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [editRoomId, setEditRoomId] = useState<string | null>(null)
-  const [radSuggestId, setRadSuggestId] = useState<string | null>(null)
-  const [selectedRadiators, setSelectedRadiators] = useState<Record<string, { id: string; qty: number }[]>>({})
 
   useEffect(() => { loadJob() }, [jobId])
-
-  // When canvas room selected → scroll to matching room in list
-  useEffect(() => {
-    if (!selectedCanvasRoom) return
-    const room = rooms.find(r => r.canvasRoomId === selectedCanvasRoom)
-    if (room) {
-      setEditRoomId(room.id)
-      setTimeout(() => roomRefs.current[room.id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50)
-    }
-  }, [selectedCanvasRoom])
 
   async function loadJob() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) { window.location.replace('/login'); return }
-
     const { data: jd } = await (supabase as any).from('jobs').select('*').eq('id', jobId).single()
     if (!jd) { window.location.replace('/jobs'); return }
-
     const { data: cd } = await (supabase as any).from('customers').select('*').eq('id', jd.customer_id).single()
     setCustomer(cd)
-
-    // Load existing design if any
-    const { data: sd } = await (supabase as any)
-      .from('system_designs').select('*').eq('job_id', jobId).single()
-
+    const { data: sd } = await (supabase as any).from('system_designs').select('*').eq('job_id', jobId).single()
     if (sd) {
       setExistingDesign(sd)
       const di = sd.design_inputs || {}
-
       if (di.settings) setSettings(di.settings)
-      if (di.rooms && di.rooms.length > 0) setRooms(di.rooms)
-      if (di.canvasRooms && di.canvasRooms.length > 0) setCanvasRooms(di.canvasRooms)
-      if (di.selectedRadiators) setSelectedRadiators(di.selectedRadiators)
-      // If design exists, default to list route (not selector)
-      if (di.rooms && di.rooms.length > 0) setRoute(di.lastRoute || 'list')
+      if (di.rooms && di.rooms.length > 0) {
+        // Recalculate all rooms on load
+        setRooms(di.rooms.map((r: Room) => calcRoom(r, di.settings?.designTempExt || -4)))
+      }
     } else if (cd) {
-      // Pre-populate from customer/EPC data
       const loc = guessLoc(cd.postcode || '')
       setSettings(prev => ({
-        ...prev,
-        location: loc,
+        ...prev, location: loc,
         designTempExt: DESIGN_TEMPS[loc]?.temp || -4,
         totalFloorAreaM2: cd.floor_area_m2 || 85,
       }))
@@ -236,73 +466,93 @@ export default function DesignPage() {
   }
 
   function guessLoc(pc: string): string {
-    const p = pc.slice(0, 2).toUpperCase()
-    const m: Record<string, string> = {
-      EC: 'London', WC: 'London', E: 'London', N: 'London', NW: 'London',
-      SE: 'London', SW: 'London', W: 'London', B: 'Birmingham', WS: 'Birmingham',
-      M: 'Manchester', L: 'Manchester', LS: 'Leeds', NE: 'Newcastle',
-      BS: 'Bristol', CF: 'Cardiff', EH: 'Edinburgh', G: 'Glasgow',
-      AB: 'Aberdeen', BT: 'Belfast', NR: 'Norwich', PL: 'Plymouth',
-      S: 'Sheffield', NG: 'Nottingham',
-    }
-    for (const [k, v] of Object.entries(m)) { if (p.startsWith(k)) return v }
+    const p = pc.slice(0,2).toUpperCase()
+    const m: Record<string,string> = { EC:'London',WC:'London',E:'London',N:'London',NW:'London',SE:'London',SW:'London',W:'London',B:'Birmingham',WS:'Birmingham',M:'Manchester',L:'Manchester',LS:'Leeds',NE:'Newcastle',BS:'Bristol',CF:'Cardiff',EH:'Edinburgh',G:'Glasgow',AB:'Aberdeen',BT:'Belfast',NR:'Norwich',PL:'Plymouth',S:'Sheffield',NG:'Nottingham' }
+    for (const [k,v] of Object.entries(m)) { if (p.startsWith(k)) return v }
     return 'Birmingham'
   }
 
-  // ─── Save ─────────────────────────────────────────────────────────────────────
+  // Recalculate all rooms when design temp changes
+  function updSettings(u: Partial<BuildingSettings>) {
+    const next = { ...settings, ...u }
+    setSettings(next)
+    if (u.designTempExt !== undefined) {
+      setRooms(prev => prev.map(r => calcRoom(r, next.designTempExt)))
+    }
+  }
 
-  async function save(redirectTo?: string) {
-    setSaving(true)
-    setSaveError('')
+  function updRoom(id: string, updates: Partial<Room>) {
+    setRooms(prev => prev.map(r => {
+      if (r.id !== id) return r
+      const updated = { ...r, ...updates }
+      // If room type changed, update default temp + ach
+      if (updates.roomType) {
+        const rt = ROOM_TYPES.find(t => t.type === updates.roomType)
+        if (rt) {
+          updated.designTempC = rt.defaultTemp
+          updated.achOverride = null
+        }
+      }
+      return calcRoom(updated, settings.designTempExt)
+    }))
+  }
+
+  function addRoom(roomType: string) {
+    const room = makeRoom(addFloor, settings)
+    const rt = ROOM_TYPES.find(t => t.type === roomType)
+    if (rt) { room.roomType = roomType; room.designTempC = rt.defaultTemp }
+    const calculated = calcRoom(room, settings.designTempExt)
+    setRooms(prev => [...prev, calculated])
+    setSelectedId(calculated.id)
+    setAddingRoom(false)
+    setActiveFloor(addFloor)
+    setTimeout(() => {
+      document.getElementById(`room_${calculated.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }, 50)
+  }
+
+  function removeRoom(id: string) {
+    setRooms(prev => prev.filter(r => r.id !== id))
+    if (selectedId === id) setSelectedId(null)
+  }
+
+  function duplicateRoom(id: string) {
+    const room = rooms.find(r => r.id === id)
+    if (!room) return
+    const dup = { ...room, id: `r_${Date.now()}`, name: room.name ? `${room.name} (copy)` : '', planX: room.planX + 20, planY: room.planY + 20 }
+    setRooms(prev => [...prev, dup])
+    setSelectedId(dup.id)
+  }
+
+  // Totals
+  const totalW = rooms.reduce((s, r) => s + r.totalW, 0)
+  const fabricW = rooms.reduce((s, r) => s + r.fabricW, 0)
+  const ventW = rooms.reduce((s, r) => s + r.ventW, 0)
+  const shl = settings.totalFloorAreaM2 > 0 ? Math.round(totalW / settings.totalFloorAreaM2) : 0
+  const recKw = Math.ceil(totalW / 1000)
+  const floors = Array.from(new Set([0, ...rooms.map(r => r.floor)])).sort((a,b) => a-b)
+  const floorRooms = rooms.filter(r => r.floor === activeFloor)
+
+  async function save(redirect?: string) {
+    setSaving(true); setSaveError('')
     try {
       const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { window.location.replace('/login'); return }
+      if (!session) return
+      const totalW2 = rooms.reduce((s,r) => s+r.totalW, 0)
+      const shl2 = settings.totalFloorAreaM2 > 0 ? Math.round(totalW2/settings.totalFloorAreaM2) : 0
+      const recKw2 = Math.ceil(totalW2/1000)
 
-      const totalW = rooms.reduce((s, r) => s + r.totalLossW, 0)
-      const shl = settings.totalFloorAreaM2 > 0 ? Math.round(totalW / settings.totalFloorAreaM2) : 0
-      const recKw = Math.ceil(totalW / 1000)
-      const flowTemp = 50 // default until system spec page sets it
-      const returnTemp = 40
-      const emitterType = 'radiators'
+      const { data: sd } = await (supabase as any).from('system_designs').select('design_inputs').eq('job_id', jobId).single()
+      const existing = sd?.design_inputs || {}
 
-      // MCS 031 SPF lookup (simplified)
-      const spfRow = [[20,3.6],[30,3.4],[40,3.2],[50,3.0],[60,2.9],[80,2.7],[100,2.6],[999,2.4]]
-      const spf = (spfRow.find(r => shl <= r[0]) || spfRow[spfRow.length-1])[1]
-      const stars = spf >= 4.0 ? 6 : spf >= 3.5 ? 5 : spf >= 3.0 ? 4 : spf >= 2.7 ? 3 : spf >= 2.4 ? 2 : 1
-      const annualHeat = Math.round((totalW / ((21 - settings.designTempExt) * 1000)) * 2200 * 24)
-      const annualElec = Math.round(annualHeat / spf)
-      const annualDHW = Math.round(45 * settings.numBedrooms * 365 * 4.18 * 0.001 / 1.7) * 100
-
-      // design_inputs stores everything needed by the system spec page
-      const design_inputs = {
-        settings,
-        rooms,          // Full RoomData array — this is what system spec reads
-        canvasRooms,
-        selectedRadiators,
-        lastRoute: route,
-        savedAt: new Date().toISOString(),
-      }
-
-      // Map to actual schema columns
       const payload = {
-        job_id: jobId,
-        design_inputs,
-        // Existing schema columns
-        hp_model: '',
-        flow_temp_c: flowTemp,
-        return_temp_c: returnTemp,
-        emitter_type: emitterType,
+        design_inputs: { ...existing, settings, rooms, lastSaved: new Date().toISOString() },
+        total_heat_loss_w: totalW2,
+        specific_heat_loss_w_m2: shl2,
+        recommended_hp_kw: recKw2,
+        flow_temp_c: existing.systemSpec?.flowTemp || 50,
+        emitter_type: existing.systemSpec?.emitterType || 'radiators',
         mcs_compliant: true,
-        // New columns we just added
-        total_heat_loss_w: totalW,
-        specific_heat_loss_w_m2: shl,
-        recommended_hp_kw: recKw,
-        spf_estimate: spf,
-        star_rating: stars,
-        annual_heat_demand_kwh: annualHeat,
-        annual_elec_space_kwh: annualElec,
-        annual_elec_dhw_kwh: annualDHW,
-        mcs_031_compliant: true,
         designed_by: session.user.id,
         designed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -310,669 +560,508 @@ export default function DesignPage() {
 
       let err: any = null
       if (existingDesign) {
-        const { error } = await (supabase as any)
-          .from('system_designs').update(payload).eq('job_id', jobId)
+        const { error } = await (supabase as any).from('system_designs').update(payload).eq('job_id', jobId)
         err = error
       } else {
-        const { error, data } = await (supabase as any)
-          .from('system_designs').insert({ ...payload, created_at: new Date().toISOString() }).select().single()
+        const { error, data } = await (supabase as any).from('system_designs').insert({ job_id: jobId, created_at: new Date().toISOString(), ...payload }).select().single()
         err = error
         if (data) setExistingDesign(data)
       }
-
-      if (err) {
-        setSaveError(`Save failed: ${err.message}`)
-        setSaving(false)
-        return
-      }
+      if (err) { setSaveError(err.message); setSaving(false); return }
 
       await (supabase as any).from('audit_log').insert({
-        job_id: jobId,
-        user_id: session.user.id,
-        action: 'design_saved',
-        stage: 'design',
+        job_id: jobId, user_id: session.user.id, action: 'design_saved', stage: 'design',
         entity_type: 'system_design',
-        description: `Design saved: ${rooms.length} rooms, ${(totalW/1000).toFixed(1)}kW heat loss`,
+        description: `Design v2 saved: ${rooms.length} rooms, ${(totalW2/1000).toFixed(1)}kW, ${shl2}W/m²`,
       })
-
-      setSaving(false)
-      setSaved(true)
+      setSaving(false); setSaved(true)
       setTimeout(() => setSaved(false), 3000)
-
-      if (redirectTo) window.location.href = redirectTo
-
-    } catch (e: any) {
-      setSaveError(`Error: ${e.message}`)
-      setSaving(false)
-    }
+      if (redirect) window.location.href = redirect
+    } catch (e: any) { setSaveError(e.message); setSaving(false) }
   }
-
-  // ─── Room management ──────────────────────────────────────────────────────────
-
-  const syncCanvasToRooms = useCallback((cRooms: CanvasRoom[]) => {
-    setRooms(prev => {
-      const updated = [...prev]
-      for (const cr of cRooms) {
-        const area = polygonAreaM2(cr.vertices)
-        const existing = updated.find(r => r.canvasRoomId === cr.id)
-        if (existing) {
-          existing.areaMm2 = area * 1e6
-          existing.roomType = cr.roomType
-          existing.name = cr.name
-          existing.floor = cr.floor
-          // Recalc loss with updated area
-          const recalced = calcRoomLoss(existing, settings.designTempExt)
-          Object.assign(existing, recalced)
-        } else {
-          const xs = cr.vertices.map(v => v.x), ys = cr.vertices.map(v => v.y)
-          const nr = calcRoomLoss({
-            ...makeRoom(`r_${cr.id}`, settings),
-            id: `r_${cr.id}`, name: cr.name, roomType: cr.roomType, floor: cr.floor,
-            lengthMm: Math.round(Math.max(...xs) - Math.min(...xs)),
-            widthMm: Math.round(Math.max(...ys) - Math.min(...ys)),
-            areaMm2: area * 1e6,
-            canvasRoomId: cr.id,
-          }, settings.designTempExt)
-          updated.push(nr)
-        }
-      }
-      return updated.filter(r => !r.canvasRoomId || cRooms.some(cr => cr.id === r.canvasRoomId))
-    })
-  }, [settings])
-
-  function handleCanvasRoomsChange(newCR: CanvasRoom[]) {
-    setCanvasRooms(newCR)
-    syncCanvasToRooms(newCR)
-  }
-
-  function addRoom() {
-    const id = `r_${Date.now()}`
-    const nr = calcRoomLoss(makeRoom(id, settings), settings.designTempExt)
-    setRooms(prev => [...prev, nr])
-    setEditRoomId(id)
-
-    if (route === 'canvas' || route === 'upload') {
-      const cid = `cr_${Date.now()}`
-      const off = canvasRooms.length * 5500
-      const verts = rectFromDimensions(off, 0, nr.lengthMm, nr.widthMm)
-      const ncr: CanvasRoom = {
-        id: cid, name: nr.name, roomType: nr.roomType, floor: nr.floor,
-        vertices: verts, wallTypes: ['external','external','external','external'], elements: [],
-      }
-      setCanvasRooms(prev => [...prev, ncr])
-      setRooms(prev => prev.map(r => r.id === id ? { ...r, canvasRoomId: cid } : r))
-      setTimeout(() => canvasRef.current?.fitToScreen(), 100)
-    }
-    setTimeout(() => roomRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50)
-  }
-
-  function updRoom(id: string, updates: Partial<RoomData>) {
-    setRooms(prev => prev.map(r => {
-      if (r.id !== id) return r
-      const updated = calcRoomLoss({ ...r, ...updates }, settings.designTempExt)
-      // Sync name/type back to canvas room
-      if (updated.canvasRoomId && (updates.name !== undefined || updates.roomType !== undefined)) {
-        setCanvasRooms(cr => cr.map(c => c.id !== updated.canvasRoomId ? c : {
-          ...c, name: updated.name ?? c.name, roomType: updated.roomType ?? c.roomType,
-        }))
-      }
-      return updated
-    }))
-  }
-
-  function removeRoom(id: string) {
-    const room = rooms.find(r => r.id === id)
-    setRooms(prev => prev.filter(r => r.id !== id))
-    if (room?.canvasRoomId) setCanvasRooms(prev => prev.filter(c => c.id !== room.canvasRoomId))
-    if (editRoomId === id) setEditRoomId(null)
-  }
-
-  function updSettings(u: Partial<DesignSettings>) {
-    const next = { ...settings, ...u }
-    setSettings(next)
-    setRooms(prev => prev.map(r => calcRoomLoss(r, next.designTempExt)))
-  }
-
-  // Canvas rooms annotated with heat loss for colour coding
-  const canvasRoomsWithLoss: CanvasRoom[] = canvasRooms.map(cr => ({
-    ...cr, heatLossW: rooms.find(r => r.canvasRoomId === cr.id)?.totalLossW,
-  }))
-
-  // Totals
-  const totalW = rooms.reduce((s, r) => s + r.totalLossW, 0)
-  const recKw = Math.ceil(totalW / 1000)
-  const floors = Array.from(new Set([0, ...canvasRooms.map(r => r.floor)])).sort((a, b) => a - b)
-  const showCanvas = route === 'canvas' || route === 'upload'
-  const deltaT = (50 + 40) / 2 - 21  // default delta T preview
 
   const inp = "w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500 bg-white"
   const sel = "w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500 bg-white"
   const lbl = "block text-xs font-medium text-gray-500 mb-1"
 
-  if (loading) {
-    return <div className="min-h-screen bg-gray-50 flex items-center justify-center"><p className="text-sm text-gray-400">Loading...</p></div>
-  }
+  if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><p className="text-sm text-gray-400">Loading...</p></div>
 
-  // ─── Route selector ───────────────────────────────────────────────────────────
-
-  if (route === 'selector') {
-    const hasExisting = existingDesign && rooms.length > 0
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-emerald-700 rounded-lg flex items-center justify-center">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="white"><path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z"/></svg>
-            </div>
-            <div>
-              <div className="text-xs font-semibold text-gray-900">MCS Design Tool</div>
-              {customer && <div className="text-xs text-gray-400">{customer.first_name} {customer.last_name} · {customer.address_line1}</div>}
-            </div>
-          </div>
-          <a href={`/jobs/${jobId}`} className="text-xs text-gray-400 hover:text-gray-600">← Back to job</a>
-        </div>
-
-        <div className="max-w-3xl mx-auto px-6 py-10">
-
-          {/* Existing design banner */}
-          {hasExisting && (
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-6 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center text-emerald-700">✓</div>
-                <div>
-                  <div className="text-sm font-medium text-emerald-900">Design in progress</div>
-                  <div className="text-xs text-emerald-700 mt-0.5">
-                    {rooms.length} rooms · {(totalW/1000).toFixed(1)} kW total heat loss · last saved {existingDesign?.designed_at ? new Date(existingDesign.designed_at).toLocaleDateString('en-GB') : 'unknown'}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button onClick={() => setRoute('list')} className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium px-4 py-2 rounded-lg">
-                  Continue design →
-                </button>
-                <a href={`/jobs/${jobId}/design/system`} className="text-xs text-emerald-700 hover:underline px-2">
-                  Go to spec →
-                </a>
-              </div>
-            </div>
-          )}
-
-          <div className="text-center mb-6">
-            <h1 className="text-lg font-semibold text-gray-900 mb-1">
-              {hasExisting ? 'Start a new design' : 'How would you like to design this system?'}
-            </h1>
-            <p className="text-sm text-gray-500">All three routes share the same room data — switch between them at any time.</p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            {[
-              {
-                route: 'list' as DesignRoute,
-                icon: (
-                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                    <rect x="4" y="4" width="24" height="24" rx="3" fill="#d1fae5" stroke="#059669" strokeWidth="1.5"/>
-                    <line x1="9" y1="11" x2="23" y2="11" stroke="#059669" strokeWidth="1.5" strokeLinecap="round"/>
-                    <line x1="9" y1="16" x2="23" y2="16" stroke="#059669" strokeWidth="1.5" strokeLinecap="round"/>
-                    <line x1="9" y1="21" x2="18" y2="21" stroke="#059669" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
-                ),
-                title: 'Room by room',
-                desc: 'Enter each room manually with dimensions and fabric details. Best for data entry from survey notes.',
-                features: ['Full fabric element control', 'Custom U-values', 'Radiator selection', 'Rooms auto-appear in floor plan'],
-              },
-              {
-                route: 'canvas' as DesignRoute,
-                icon: (
-                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                    <rect x="4" y="4" width="24" height="24" rx="3" fill="#dbeafe" stroke="#3b82f6" strokeWidth="1.5"/>
-                    <rect x="7" y="7" width="10" height="8" rx="1" fill="none" stroke="#3b82f6" strokeWidth="1.5"/>
-                    <rect x="17" y="7" width="8" height="8" rx="1" fill="none" stroke="#3b82f6" strokeWidth="1.5"/>
-                    <rect x="7" y="17" width="18" height="8" rx="1" fill="none" stroke="#3b82f6" strokeWidth="1.5"/>
-                  </svg>
-                ),
-                title: 'Draw floor plan',
-                desc: 'Draw rooms on a canvas, floor by floor. Walls auto-type when rooms touch.',
-                features: ['Draw any room shape', 'Auto internal wall detection', 'Place windows, doors, radiators', 'Rectangular drag stays square'],
-              },
-              {
-                route: 'upload' as DesignRoute,
-                icon: (
-                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                    <rect x="4" y="4" width="24" height="24" rx="3" fill="#fef3c7" stroke="#f59e0b" strokeWidth="1.5"/>
-                    <path d="M16 20v-8M12 16l4-4 4 4" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    <line x1="10" y1="22" x2="22" y2="22" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
-                ),
-                title: 'Upload existing plan',
-                desc: 'Upload a photo or PDF of an existing floor plan. Set scale and trace rooms over it.',
-                features: ['Works with any plan format', 'Set scale from known dimension', 'Trace rooms over background', 'Auto-populates room list'],
-              },
-            ].map(opt => (
-              <button key={opt.route}
-                onClick={() => {
-                  if (hasExisting) {
-                    // New design — clear existing rooms
-                    setRooms([])
-                    setCanvasRooms([])
-                    setSelectedRadiators({})
-                  }
-                  setRoute(opt.route)
-                }}
-                className="text-left bg-white border-2 border-gray-200 hover:border-emerald-500 rounded-xl p-5 transition-all hover:shadow-md group">
-                <div className="mb-3">{opt.icon}</div>
-                <div className="text-sm font-semibold text-gray-900 mb-1 group-hover:text-emerald-700">{opt.title}</div>
-                <div className="text-xs text-gray-500 mb-3 leading-relaxed">{opt.desc}</div>
-                <div className="space-y-1">
-                  {opt.features.map(f => (
-                    <div key={f} className="flex items-center gap-1.5 text-xs text-gray-400">
-                      <span className="text-emerald-500 font-bold">✓</span>{f}
-                    </div>
-                  ))}
-                </div>
-              </button>
-            ))}
-          </div>
-
-          <div className="mt-5 text-center">
-            <label className="cursor-pointer text-xs text-emerald-700 hover:underline">
-              Or upload a plan to get started immediately →
-              <input type="file" accept="image/*,.pdf" className="hidden" onChange={e => {
-                const file = e.target.files?.[0]
-                if (!file) return
-                const reader = new FileReader()
-                reader.onload = ev => { setUploadImage(ev.target?.result as string); if (hasExisting) { setRooms([]); setCanvasRooms([]) }; setRoute('upload') }
-                reader.readAsDataURL(file)
-              }}/>
-            </label>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ─── Main design tool ─────────────────────────────────────────────────────────
+  const selectedRoom = rooms.find(r => r.id === selectedId) || null
 
   return (
-    <div className="flex flex-col bg-gray-50" style={{ height: '100dvh' }}>
+    <div className="min-h-screen bg-gray-50 flex flex-col" style={{ height: '100dvh' }}>
 
-      {/* Header */}
+      {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="w-6 h-6 bg-emerald-700 rounded flex items-center justify-center flex-shrink-0">
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="white"><path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z"/></svg>
+        <div className="flex items-center gap-3">
+          <div className="w-7 h-7 bg-emerald-700 rounded-lg flex items-center justify-center flex-shrink-0">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="white"><path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z"/></svg>
           </div>
-          {customer && <span className="text-xs text-gray-600 font-medium hidden sm:block">{customer.first_name} {customer.last_name}</span>}
-
-          {/* Route tabs */}
-          <div className="flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
-            {([
-              ['selector', '⊞', 'Routes'],
-              ['list', '≡', 'Room list'],
-              ['canvas', '⬛', 'Floor plan'],
-              ['upload', '↑', 'Upload plan'],
-            ] as const).map(([r, icon, label]) => (
-              <button key={r} onClick={() => setRoute(r as DesignRoute)}
-                className={`text-xs px-2.5 py-1.5 rounded-md font-medium transition-colors flex items-center gap-1 ${route === r ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                <span>{icon}</span>
-                <span className="hidden sm:inline">{label}</span>
+          <div className="hidden sm:block">
+            <div className="text-xs font-semibold text-gray-900">Heat Loss Design</div>
+            {customer && <div className="text-xs text-gray-400">{customer.first_name} {customer.last_name} · {customer.postcode}</div>}
+          </div>
+          {/* View tabs */}
+          <div className="flex gap-0.5 bg-gray-100 rounded-lg p-0.5 ml-2">
+            {([['rooms','Rooms','≡'],['floorplan','Floor plan','⬛']] as const).map(([v, label, icon]) => (
+              <button key={v} onClick={() => setView(v as ViewMode)}
+                className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors flex items-center gap-1.5 ${view === v ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                <span>{icon}</span><span className="hidden sm:inline">{label}</span>
               </button>
             ))}
           </div>
         </div>
-
         <div className="flex items-center gap-2">
           {/* Live totals */}
           {rooms.length > 0 && (
             <div className="hidden md:flex items-center gap-1.5">
               <span className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full font-mono">{(totalW/1000).toFixed(1)}kW</span>
               <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-1 rounded-full font-mono font-semibold">{recKw}kW rec</span>
-              <span className="text-xs text-gray-400">{rooms.length}R</span>
+              <span className="text-xs text-gray-400">{shl}W/m²</span>
             </div>
           )}
-
-          {saveError && <span className="text-xs text-red-600 max-w-xs truncate">{saveError}</span>}
           <a href={`/jobs/${jobId}`} className="text-xs text-gray-400 hover:text-gray-600 hidden sm:block">← Job</a>
+          {saveError && <span className="text-xs text-red-600 max-w-xs truncate">{saveError}</span>}
           <button onClick={() => save()} disabled={saving}
             className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-medium px-3 py-1.5 rounded-lg">
-            {saving ? 'Saving...' : saved ? '✓ Saved' : 'Save'}
+            {saving ? '...' : saved ? '✓' : 'Save'}
           </button>
         </div>
       </div>
 
-      {/* MCS compliance strip */}
+      {/* MCS strip */}
       <div className="bg-emerald-700 text-white px-4 py-1 flex items-center gap-3 text-xs flex-shrink-0">
         <span className="font-medium">MCS Compliant</span>
-        <span>MIS 3005-D</span><span>MCS 031 v4.0</span><span>BS EN 12831-1:2017</span>
-        <span className="ml-auto text-emerald-200">{DESIGN_TEMPS[settings.location]?.label} · {settings.designTempExt}°C ext design temp</span>
+        <span>MIS 3005-D · BS EN 12831-1:2017</span>
+        <span className="ml-auto">{DESIGN_TEMPS[settings.location]?.label} · {settings.designTempExt}°C</span>
       </div>
 
-      {/* Canvas toolbar — only for canvas/upload routes */}
-      {showCanvas && (
-        <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-2 flex-wrap flex-shrink-0">
+      <div className="flex flex-1 overflow-hidden">
 
-          {/* Draw tools */}
-          <div className="flex gap-1 items-center">
-            <span className="text-xs text-gray-400 mr-1 hidden sm:block">Draw:</span>
-            {([
-              ['select', 'cursor', '↖', 'Select & move'],
-              ['draw', 'pencil', '✏', 'Draw room'],
-              ['pan', 'hand', '✋', 'Pan canvas'],
-            ] as const).map(([t, , icon, label]) => (
-              <button key={t} onClick={() => setCanvasTool(t as CanvasTool)} title={label}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border transition-colors flex items-center gap-1 ${canvasTool === t ? 'bg-emerald-700 text-white border-emerald-700' : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-400'}`}>
-                <span>{icon}</span>
-                <span className="hidden sm:inline text-xs">{label}</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="h-4 w-px bg-gray-200"/>
-
-          {/* Element placement tools */}
-          <div className="flex gap-1 items-center">
-            <span className="text-xs text-gray-400 mr-1 hidden sm:block">Place:</span>
-            {([
-              ['addWindow', '▭', 'Window', 'bg-blue-50 text-blue-700 border-blue-200'],
-              ['addDoor', '⬚', 'Door', 'bg-amber-50 text-amber-700 border-amber-200'],
-              ['addRadiator', '▬', 'Radiator', 'bg-red-50 text-red-700 border-red-200'],
-            ] as const).map(([t, icon, label, activeClass]) => (
-              <button key={t} onClick={() => setCanvasTool(t as CanvasTool)} title={`Place ${label} — click on a wall`}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border transition-colors flex items-center gap-1 font-medium ${canvasTool === t ? activeClass + ' border-2' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'}`}>
-                <span>{icon}</span>
-                <span>{label}</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="h-4 w-px bg-gray-200"/>
-
-          {/* Zoom + floors */}
-          <div className="flex gap-1 items-center">
-            <button onClick={() => canvasRef.current?.zoomIn()} className="text-xs px-2 py-1.5 border border-gray-200 rounded hover:bg-gray-50 font-mono">+</button>
-            <button onClick={() => canvasRef.current?.zoomOut()} className="text-xs px-2 py-1.5 border border-gray-200 rounded hover:bg-gray-50 font-mono">−</button>
-            <button onClick={() => canvasRef.current?.fitToScreen()} className="text-xs px-2 py-1.5 border border-gray-200 rounded hover:bg-gray-50">Fit</button>
-          </div>
-
-          <div className="flex gap-1 items-center">
-            {floors.map(f => (
-              <button key={f} onClick={() => setActiveFloor(f)}
-                className={`text-xs px-2 py-1 rounded border ${activeFloor === f ? 'bg-emerald-700 text-white border-emerald-700' : 'border-gray-200 text-gray-600 hover:border-emerald-400'}`}>
-                {f === 0 ? 'GF' : f === 1 ? 'FF' : f === 2 ? 'SF' : `F${f}`}
-              </button>
-            ))}
-            <button onClick={() => setActiveFloor(floors.length)}
-              className="text-xs px-2 py-1 border border-dashed border-gray-300 text-gray-400 rounded hover:border-emerald-400">+</button>
-          </div>
-
-          <div className="h-4 w-px bg-gray-200"/>
-          <label className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer">
-            <input type="checkbox" checked={showGrid} onChange={e => setShowGrid(e.target.checked)} className="rounded"/> Grid
-          </label>
-          <label className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer">
-            <input type="checkbox" checked={showDimensions} onChange={e => setShowDimensions(e.target.checked)} className="rounded"/> Dims
-          </label>
-          <select className="text-xs border border-gray-200 rounded px-2 py-1" value={gridMm} onChange={e => setGridMm(parseInt(e.target.value))}>
-            <option value={50}>50mm</option><option value={100}>100mm</option>
-            <option value={250}>250mm</option><option value={500}>500mm</option>
-          </select>
-
-          {route === 'upload' && (
-            <label className="text-xs text-emerald-700 hover:underline cursor-pointer ml-1">
-              Change plan
-              <input type="file" accept="image/*,.pdf" className="hidden" onChange={e => {
-                const file = e.target.files?.[0]; if (!file) return
-                const reader = new FileReader()
-                reader.onload = ev => setUploadImage(ev.target?.result as string)
-                reader.readAsDataURL(file)
-              }}/>
-            </label>
-          )}
-
-          {selectedCanvasRoom && (
-            <button onClick={() => canvasRef.current?.deleteSelected()} className="text-xs text-red-500 hover:text-red-700 ml-auto">Delete room</button>
-          )}
-        </div>
-      )}
-
-      {/* Main content */}
-      <div className={`flex flex-1 overflow-hidden ${showCanvas ? 'flex-col lg:flex-row' : ''}`}>
-
-        {/* Canvas */}
-        {showCanvas && (
-          <div className="flex-1 min-h-0" style={{ minHeight: '40vh' }}>
-            <FloorPlanCanvas
-              ref={canvasRef}
-              rooms={canvasRoomsWithLoss}
-              activeFloor={activeFloor}
-              tool={canvasTool}
-              gridMm={gridMm}
-              showGrid={showGrid}
-              showDimensions={showDimensions}
-              showHeatLoss={true}
-              backgroundImage={route === 'upload' ? uploadImage || undefined : undefined}
-              onRoomsChange={handleCanvasRoomsChange}
-              onRoomSelect={setSelectedCanvasRoom}
-              selectedRoomId={selectedCanvasRoom}
-            />
-          </div>
-        )}
-
-        {/* Right / full panel */}
-        <div className={`bg-white border-t lg:border-t-0 lg:border-l border-gray-200 overflow-y-auto flex-shrink-0 ${showCanvas ? 'w-full lg:w-80 xl:w-96' : 'w-full max-w-3xl mx-auto'}`}>
-          <div className="p-4 space-y-3">
-
-            {/* Location settings row */}
-            <div className="grid grid-cols-2 gap-2">
+        {/* ── Building structure sidebar ──────────────────────────────────── */}
+        <div className="w-48 bg-white border-r border-gray-200 flex flex-col flex-shrink-0 hidden lg:flex">
+          {/* Building settings */}
+          <div className="p-3 border-b border-gray-100">
+            <div className="text-xs font-semibold text-gray-700 mb-2">Building</div>
+            <div className="space-y-1.5">
               <div>
-                <label className={lbl}>Location</label>
-                <select className={sel} value={settings.location}
-                  onChange={e => updSettings({ location: e.target.value, designTempExt: DESIGN_TEMPS[e.target.value]?.temp || -4 })}>
+                <label className="block text-xs text-gray-400 mb-0.5">Location</label>
+                <select className="w-full text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:border-emerald-500"
+                  value={settings.location} onChange={e => updSettings({ location: e.target.value, designTempExt: DESIGN_TEMPS[e.target.value]?.temp || -4 })}>
                   {Object.entries(DESIGN_TEMPS).map(([k,v]) => <option key={k} value={k}>{v.label}</option>)}
                 </select>
               </div>
               <div>
-                <label className={lbl}>Ext design temp (°C)</label>
-                <input type="number" className={inp} value={settings.designTempExt} step={0.5}
-                  onChange={e => updSettings({ designTempExt: parseFloat(e.target.value) || -4 })}/>
+                <label className="block text-xs text-gray-400 mb-0.5">Floor area (m²)</label>
+                <input type="number" className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+                  value={settings.totalFloorAreaM2} step={5}
+                  onChange={e => updSettings({ totalFloorAreaM2: parseFloat(e.target.value)||85 })}/>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Bedrooms</label>
+                <input type="number" className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+                  value={settings.numBedrooms} min={1} max={8}
+                  onChange={e => updSettings({ numBedrooms: parseInt(e.target.value)||3 })}/>
               </div>
             </div>
+          </div>
 
-            {/* Room list */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-xs font-semibold text-gray-700">
-                  Rooms ({showCanvas ? rooms.filter(r => r.floor === activeFloor).length : rooms.length})
-                  {showCanvas && <span className="text-gray-400 font-normal ml-1">on this floor</span>}
+          {/* Default construction */}
+          <div className="p-3 border-b border-gray-100">
+            <div className="text-xs font-semibold text-gray-700 mb-2">Default construction</div>
+            <div className="space-y-1.5">
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Walls</label>
+                <select className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+                  value={settings.defaultWallPreset} onChange={e => updSettings({ defaultWallPreset: e.target.value })}>
+                  {WALL_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label} ({p.u})</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Windows</label>
+                <select className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+                  value={settings.defaultWindowPreset} onChange={e => updSettings({ defaultWindowPreset: e.target.value })}>
+                  {WINDOW_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label} ({p.u})</option>)}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Floor navigation — building cross-section style */}
+          <div className="p-3 flex-1">
+            <div className="text-xs font-semibold text-gray-700 mb-2">Floors</div>
+            <div className="space-y-1">
+              {[...floors].reverse().map(f => {
+                const fRooms = rooms.filter(r => r.floor === f)
+                const fTotal = fRooms.reduce((s,r) => s+r.totalW, 0)
+                return (
+                  <button key={f} onClick={() => setActiveFloor(f)}
+                    className={`w-full text-left px-3 py-2 rounded-lg transition-colors border ${activeFloor === f ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-white border-gray-200 text-gray-600 hover:border-emerald-300'}`}>
+                    <div className="text-xs font-semibold">
+                      {f === 0 ? 'Ground floor' : f === 1 ? 'First floor' : f === 2 ? 'Second floor' : `Floor ${f}`}
+                    </div>
+                    <div className="text-xs text-gray-400">{fRooms.length} rooms · {(fTotal/1000).toFixed(1)}kW</div>
+                  </button>
+                )
+              })}
+              <button onClick={() => { const next = Math.max(...floors) + 1; setRooms(prev => prev); setActiveFloor(next); if (!floors.includes(next)) setActiveFloor(next) }}
+                className="w-full text-left px-3 py-2 rounded-lg border border-dashed border-gray-300 text-gray-400 text-xs hover:border-emerald-400 hover:text-emerald-600 transition-colors">
+                + Add floor
+              </button>
+            </div>
+          </div>
+
+          {/* Building totals */}
+          {rooms.length > 0 && (
+            <div className="p-3 border-t border-gray-100 bg-emerald-700 text-white">
+              <div className="text-xs text-emerald-200 mb-1">Building total</div>
+              <div className="text-base font-bold">{(totalW/1000).toFixed(2)} kW</div>
+              <div className="text-xs text-emerald-200">{recKw}kW ASHP · {shl}W/m²</div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Main area ────────────────────────────────────────────────────── */}
+        <div className="flex flex-1 overflow-hidden">
+
+          {/* Room list / floor plan */}
+          <div className="flex-1 overflow-y-auto p-4">
+
+            {/* Floor header */}
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900">
+                  {activeFloor === 0 ? 'Ground floor' : activeFloor === 1 ? 'First floor' : activeFloor === 2 ? 'Second floor' : `Floor ${activeFloor}`}
+                </h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {floorRooms.length} room{floorRooms.length !== 1 ? 's' : ''} · {(floorRooms.reduce((s,r)=>s+r.totalW,0)/1000).toFixed(1)}kW on this floor
+                </p>
+              </div>
+              <button onClick={() => { setAddFloor(activeFloor); setAddingRoom(true) }}
+                className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-4 py-2 rounded-xl flex items-center gap-2">
+                <span className="text-base leading-none">+</span> Add room
+              </button>
+            </div>
+
+            {/* Floor plan view */}
+            {view === 'floorplan' && (
+              <div className="mb-4">
+                <FloorPlanPreview
+                  rooms={rooms}
+                  activeFloor={activeFloor}
+                  selectedId={selectedId}
+                  onSelect={id => setSelectedId(selectedId === id ? null : id)}
+                  totalW={totalW}
+                />
+                <div className="flex items-center gap-3 mt-2 text-xs text-gray-400">
+                  <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded bg-emerald-100 border border-emerald-300"/><span>Low loss (&lt;40 W/m²)</span></div>
+                  <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded bg-yellow-100 border border-yellow-300"/><span>Medium (40–70)</span></div>
+                  <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded bg-orange-100 border border-orange-300"/><span>High (70–100)</span></div>
+                  <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded bg-red-100 border border-red-300"/><span>Very high (&gt;100)</span></div>
                 </div>
-                <button onClick={addRoom}
-                  className="text-xs bg-emerald-700 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-800 font-medium">
-                  + Add room
+              </div>
+            )}
+
+            {/* Room cards */}
+            {floorRooms.length === 0 && !addingRoom && (
+              <div className="bg-white border-2 border-dashed border-gray-200 rounded-2xl p-10 text-center">
+                <div className="text-2xl mb-2">🏠</div>
+                <div className="text-sm font-medium text-gray-600 mb-1">No rooms on this floor yet</div>
+                <div className="text-xs text-gray-400 mb-4">Add rooms to calculate heat loss for each space</div>
+                <button onClick={() => { setAddFloor(activeFloor); setAddingRoom(true) }}
+                  className="bg-emerald-700 text-white text-xs font-semibold px-6 py-2.5 rounded-xl hover:bg-emerald-800">
+                  Add first room
                 </button>
               </div>
+            )}
 
-              {rooms.length === 0 && (
-                <div className="bg-gray-50 border border-gray-200 rounded-xl p-6 text-center">
-                  <div className="text-xs text-gray-400 mb-2">
-                    {showCanvas ? 'Draw rooms on the canvas or click + Add room' : 'Click + Add room to get started'}
-                  </div>
-                </div>
-              )}
-
-              {(showCanvas ? rooms.filter(r => r.floor === activeFloor) : rooms).map(room => {
-                const isCanvasSel = room.canvasRoomId === selectedCanvasRoom
-                const areaM2 = room.areaMm2 > 0 ? room.areaMm2 / 1e6 : room.lengthMm * room.widthMm / 1e6
+            <div className="space-y-2">
+              {floorRooms.map(room => {
+                const isSelected = room.id === selectedId
+                const rt = ROOM_TYPES.find(t => t.type === room.roomType)
+                const areaM2 = room.areaMm2 > 0 ? room.areaMm2 / 1e6 : 0
 
                 return (
-                  <div key={room.id} ref={el => { roomRefs.current[room.id] = el }}
-                    className={`border rounded-xl mb-2 overflow-hidden transition-colors ${isCanvasSel ? 'border-emerald-400 shadow-sm' : 'border-gray-200'}`}>
+                  <div key={room.id} id={`room_${room.id}`}
+                    className={`bg-white border-2 rounded-2xl overflow-hidden transition-all ${isSelected ? 'border-emerald-400 shadow-md' : 'border-gray-200 hover:border-gray-300'}`}>
 
-                    {/* Header */}
-                    <div className={`flex items-center justify-between px-3 py-2 cursor-pointer ${isCanvasSel ? 'bg-emerald-50' : 'bg-gray-50 hover:bg-gray-100'}`}
-                      onClick={() => {
-                        setEditRoomId(editRoomId === room.id ? null : room.id)
-                        if (room.canvasRoomId) setSelectedCanvasRoom(room.canvasRoomId)
-                      }}>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-semibold text-gray-900 truncate">{room.name || room.roomType}</div>
-                        <div className="text-xs text-gray-400">{room.roomType} · {areaM2.toFixed(1)}m² · {ROOM_TEMPS[room.roomType]||21}°C</div>
-                      </div>
-                      <div className="flex items-center gap-3 flex-shrink-0 ml-2">
-                        <div className="text-right">
-                          <div className="text-xs font-bold text-emerald-700">{room.totalLossW}W</div>
-                          <div className="text-xs text-gray-400">{(room.totalLossW/1000).toFixed(2)}kW</div>
+                    {/* Room header — always visible */}
+                    <div className="flex items-center justify-between px-4 py-3 cursor-pointer"
+                      onClick={() => setSelectedId(isSelected ? null : room.id)}>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className="text-xl flex-shrink-0">{rt?.icon || '🏠'}</span>
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-gray-900 truncate">
+                            {room.name || room.roomType}
+                          </div>
+                          <div className="text-xs text-gray-400">
+                            {room.roomType} · {(room.lengthMm/1000).toFixed(1)}×{(room.widthMm/1000).toFixed(1)}m
+                            {areaM2 > 0 ? ` · ${areaM2.toFixed(1)}m²` : ''}
+                            {room.designTempC}°C
+                          </div>
                         </div>
-                        <button onClick={e => { e.stopPropagation(); removeRoom(room.id) }} className="text-gray-400 hover:text-red-500 text-xs">✕</button>
+                      </div>
+                      <div className="flex items-center gap-4 flex-shrink-0">
+                        {/* Heat loss bar */}
+                        <div className="hidden sm:flex flex-col items-end gap-0.5">
+                          <div className="text-sm font-bold text-gray-900">{room.totalW.toLocaleString()}W</div>
+                          <div className="flex gap-1 text-xs">
+                            <span className="text-gray-400">{room.fabricW}W fabric</span>
+                            <span className="text-gray-300">+</span>
+                            <span className="text-gray-400">{room.ventW}W vent</span>
+                          </div>
+                        </div>
+                        <div className="sm:hidden text-sm font-bold text-emerald-700">{room.totalW}W</div>
+                        <span className={`transition-transform ${isSelected ? 'rotate-180' : ''} text-gray-400`}>▾</span>
                       </div>
                     </div>
 
-                    {/* Edit panel */}
-                    {editRoomId === room.id && (
-                      <div className="px-3 py-3 space-y-2.5 bg-white border-t border-gray-100">
-                        <div className="grid grid-cols-2 gap-2">
+                    {/* Expanded edit panel */}
+                    {isSelected && (
+                      <div className="border-t border-gray-100 bg-gray-50 px-4 py-4 space-y-4">
+
+                        {/* Row 1: Basic identity */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                           <div>
-                            <label className={lbl}>Room name</label>
+                            <label className={lbl}>Room name (optional)</label>
                             <input type="text" className={inp} value={room.name} placeholder={room.roomType}
                               onChange={e => updRoom(room.id, { name: e.target.value })}/>
                           </div>
                           <div>
                             <label className={lbl}>Room type</label>
                             <select className={sel} value={room.roomType} onChange={e => updRoom(room.id, { roomType: e.target.value })}>
-                              {Object.entries(ROOM_TEMPS).map(([t,temp]) => <option key={t} value={t}>{t} ({temp}°C)</option>)}
+                              {ROOM_TYPES.map(rt => <option key={rt.type} value={rt.type}>{rt.icon} {rt.type}</option>)}
                             </select>
                           </div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2">
-                          <div><label className={lbl}>L (mm)</label><input type="number" className={inp} value={room.lengthMm} step={100} onChange={e => updRoom(room.id, { lengthMm: parseInt(e.target.value)||0 })}/></div>
-                          <div><label className={lbl}>W (mm)</label><input type="number" className={inp} value={room.widthMm} step={100} onChange={e => updRoom(room.id, { widthMm: parseInt(e.target.value)||0 })}/></div>
-                          <div><label className={lbl}>H (mm)</label><input type="number" className={inp} value={room.heightMm} step={50} onChange={e => updRoom(room.id, { heightMm: parseInt(e.target.value)||0 })}/></div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className={lbl}>External wall</label>
-                            <select className={sel} value={Object.entries(WALL_PRESETS).find(([,v])=>v.u===room.extWallU)?.[0]||'custom'}
-                              onChange={e => updRoom(room.id, { extWallU: WALL_PRESETS[e.target.value]?.u || room.extWallU })}>
-                              {Object.entries(WALL_PRESETS).map(([k,v]) => <option key={k} value={k}>{v.label}</option>)}
+                            <label className={lbl}>Design temp (°C)</label>
+                            <input type="number" className={inp} value={room.designTempC} step={0.5}
+                              onChange={e => updRoom(room.id, { designTempC: parseFloat(e.target.value)||21 })}/>
+                          </div>
+                          <div>
+                            <label className={lbl}>Ceiling height (mm)</label>
+                            <input type="number" className={inp} value={room.heightMm} step={50}
+                              onChange={e => updRoom(room.id, { heightMm: parseInt(e.target.value)||2400 })}/>
+                          </div>
+                        </div>
+
+                        {/* Row 2: Shape + dimensions */}
+                        <div>
+                          <label className={`${lbl} mb-2`}>Room shape</label>
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            {ROOM_SHAPES.map(s => (
+                              <button key={s.id} onClick={() => updRoom(room.id, { shape: s.id as RoomShape })}
+                                className={`flex flex-col items-center gap-1 p-2 rounded-xl border-2 transition-colors ${room.shape === s.id ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+                                <ShapePreview shape={s.id as RoomShape} l={room.lengthMm} w={room.widthMm} cl={room.cutLengthMm} cw={room.cutWidthMm}/>
+                                <span className="text-xs text-gray-600">{s.label}</span>
+                              </button>
+                            ))}
+                          </div>
+
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <div>
+                              <label className={lbl}>Length (mm)</label>
+                              <input type="number" className={inp} value={room.lengthMm} step={100}
+                                onChange={e => updRoom(room.id, { lengthMm: parseInt(e.target.value)||0 })}/>
+                            </div>
+                            <div>
+                              <label className={lbl}>Width (mm)</label>
+                              <input type="number" className={inp} value={room.widthMm} step={100}
+                                onChange={e => updRoom(room.id, { widthMm: parseInt(e.target.value)||0 })}/>
+                            </div>
+                            {room.shape !== 'rect' && room.shape !== 'bay' && (
+                              <>
+                                <div>
+                                  <label className={lbl}>Cut length (mm)</label>
+                                  <input type="number" className={inp} value={room.cutLengthMm} step={100}
+                                    onChange={e => updRoom(room.id, { cutLengthMm: parseInt(e.target.value)||0 })}/>
+                                </div>
+                                <div>
+                                  <label className={lbl}>Cut width (mm)</label>
+                                  <input type="number" className={inp} value={room.cutWidthMm} step={100}
+                                    onChange={e => updRoom(room.id, { cutWidthMm: parseInt(e.target.value)||0 })}/>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Row 3: Fabric construction */}
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                          <div>
+                            <label className={lbl}>External walls</label>
+                            <select className={sel} value={room.wallPreset} onChange={e => updRoom(room.id, { wallPreset: e.target.value })}>
+                              {WALL_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label} (U{p.u})</option>)}
+                              <option value="custom">Custom U-value</option>
                             </select>
+                            {room.wallPreset === 'custom' && (
+                              <input type="number" className={`${inp} mt-1`} value={room.wallUCustom} step={0.01} placeholder="U-value W/m²K"
+                                onChange={e => updRoom(room.id, { wallUCustom: parseFloat(e.target.value)||0 })}/>
+                            )}
                           </div>
                           <div>
                             <label className={lbl}>Windows</label>
-                            <select className={sel} value={Object.entries(WINDOW_PRESETS).find(([,v])=>v.u===room.windowU)?.[0]||'custom'}
-                              onChange={e => updRoom(room.id, { windowU: WINDOW_PRESETS[e.target.value]?.u || room.windowU })}>
-                              {Object.entries(WINDOW_PRESETS).map(([k,v]) => <option key={k} value={k}>{v.label}</option>)}
+                            <select className={sel} value={room.windowPreset} onChange={e => updRoom(room.id, { windowPreset: e.target.value })}>
+                              {WINDOW_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label} (U{p.u})</option>)}
+                              <option value="custom">Custom U-value</option>
+                            </select>
+                            {room.windowPreset === 'custom' && (
+                              <input type="number" className={`${inp} mt-1`} value={room.windowUCustom} step={0.1} placeholder="U-value W/m²K"
+                                onChange={e => updRoom(room.id, { windowUCustom: parseFloat(e.target.value)||0 })}/>
+                            )}
+                          </div>
+                          <div>
+                            <label className={lbl}>Window area (m² — blank = auto 15%)</label>
+                            <input type="number" className={inp} value={room.windowAreaM2 || ''} step={0.1}
+                              placeholder={`~${(roomArea(room)*0.15).toFixed(1)}m² auto`}
+                              onChange={e => updRoom(room.id, { windowAreaM2: parseFloat(e.target.value)||0 })}/>
+                          </div>
+                          <div>
+                            <label className={lbl}>Floor construction</label>
+                            <select className={sel} value={room.floorPreset} onChange={e => updRoom(room.id, { floorPreset: e.target.value })}>
+                              {FLOOR_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}{p.u > 0 ? ` (U${p.u})` : ' (no loss)'}</option>)}
+                              <option value="custom">Custom U-value</option>
                             </select>
                           </div>
                           <div>
-                            <label className={lbl}>Floor</label>
-                            <select className={sel} value={room.floorAdj} onChange={e => updRoom(room.id, { floorAdj: e.target.value })}>
+                            <label className={lbl}>Floor — below is</label>
+                            <select className={sel} value={room.floorAdj} onChange={e => updRoom(room.id, { floorAdj: e.target.value as FloorAdj })}>
                               <option value="ground">Ground (10°C)</option>
                               <option value="heated">Heated space</option>
-                              <option value="unheated">Unheated</option>
+                              <option value="unheated">Unheated space</option>
+                              <option value="outside">Outside air</option>
                             </select>
                           </div>
                           <div>
-                            <label className={lbl}>Ceiling</label>
-                            <select className={sel} value={room.ceilingAdj} onChange={e => updRoom(room.id, { ceilingAdj: e.target.value })}>
-                              <option value="heated">Heated</option>
-                              <option value="roof">Roof (outside)</option>
-                              <option value="unheated">Unheated loft</option>
+                            <label className={lbl}>Ceiling construction</label>
+                            <select className={sel} value={room.ceilingPreset} onChange={e => updRoom(room.id, { ceilingPreset: e.target.value })}>
+                              {CEILING_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}{p.u > 0 ? ` (U${p.u})` : ' (no loss)'}</option>)}
+                              <option value="custom">Custom U-value</option>
                             </select>
                           </div>
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
+
+                        {/* Row 4: Ventilation */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                           <div>
-                            <label className={lbl}>ACH override (blank = CIBSE)</label>
+                            <label className={lbl}>ACH override (blank = CIBSE default {ROOM_TYPES.find(t=>t.type===room.roomType)?.defaultAch || 1.5})</label>
                             <input type="number" className={inp} value={room.achOverride ?? ''} step={0.1}
-                              placeholder={`${ROOM_ACH[room.roomType]||1.5} (default)`}
+                              placeholder={`${ROOM_TYPES.find(t=>t.type===room.roomType)?.defaultAch || 1.5}`}
                               onChange={e => { const v = parseFloat(e.target.value); updRoom(room.id, { achOverride: isNaN(v) ? null : v }) }}/>
                           </div>
-                          <div className="flex items-end">
-                            <label className="flex items-center gap-2 cursor-pointer pb-1.5">
+                          <div>
+                            <label className={lbl}>External door area (m²)</label>
+                            <input type="number" className={inp} value={room.extDoorAreaM2 || ''} step={0.1} placeholder="0"
+                              onChange={e => updRoom(room.id, { extDoorAreaM2: parseFloat(e.target.value)||0 })}/>
+                          </div>
+                          <div className="flex items-end col-span-2">
+                            <label className="flex items-center gap-2 cursor-pointer">
                               <input type="checkbox" checked={room.hasOpenFlue} onChange={e => updRoom(room.id, { hasOpenFlue: e.target.checked })} className="rounded"/>
-                              <span className="text-xs text-gray-700">Open flued appliance <span className="text-amber-600">(+1.5 ACH)</span></span>
+                              <span className="text-xs text-gray-700">Open flued appliance <span className="text-amber-600 font-medium">(+1.5 ACH)</span></span>
                             </label>
                           </div>
                         </div>
 
-                        {/* Result */}
-                        <div className="bg-emerald-700 text-white rounded-lg p-2.5 grid grid-cols-3 gap-2 text-xs">
-                          <div><div className="text-emerald-200">Fabric</div><div className="font-semibold">{room.fabricLossW}W</div></div>
-                          <div><div className="text-emerald-200">Ventilation</div><div className="font-semibold">{room.ventLossW}W</div></div>
-                          <div><div className="text-emerald-200">Total</div><div className="font-bold text-sm">{room.totalLossW}W</div></div>
+                        {/* Heat loss result */}
+                        <div className="bg-emerald-700 text-white rounded-xl p-3 grid grid-cols-4 gap-3 text-xs">
+                          <div>
+                            <div className="text-emerald-200">Area</div>
+                            <div className="font-bold">{(roomArea(room)).toFixed(1)}m²</div>
+                          </div>
+                          <div>
+                            <div className="text-emerald-200">Fabric</div>
+                            <div className="font-bold">{room.fabricW}W</div>
+                          </div>
+                          <div>
+                            <div className="text-emerald-200">Ventilation</div>
+                            <div className="font-bold">{room.ventW}W</div>
+                          </div>
+                          <div>
+                            <div className="text-emerald-200">Total</div>
+                            <div className="font-bold text-base">{room.totalW.toLocaleString()}W</div>
+                          </div>
                         </div>
 
-                        {/* Radiator suggest */}
-                        <div>
-                          <button onClick={() => setRadSuggestId(radSuggestId === room.id ? null : room.id)}
-                            className="text-xs text-emerald-700 hover:underline">
-                            {radSuggestId === room.id ? 'Hide radiators' : `Suggest Ultraheat radiators for ${room.totalLossW}W →`}
+                        {/* Room actions */}
+                        <div className="flex items-center gap-2 pt-1 border-t border-gray-200">
+                          <button onClick={() => duplicateRoom(room.id)}
+                            className="text-xs text-gray-500 hover:text-gray-700 border border-gray-200 px-3 py-1.5 rounded-lg bg-white hover:bg-gray-50">
+                            Duplicate room
                           </button>
-                          {radSuggestId === room.id && (
-                            <div className="mt-2">
-                              {(selectedRadiators[room.id]||[]).map((sr,si) => {
-                                const rad = ULTRAHEAT_RADIATORS.find(r=>r.id===sr.id); if(!rad) return null
-                                const out = radOutput(rad, deltaT)
-                                return (
-                                  <div key={si} className="flex items-center justify-between bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5 mb-1.5 text-xs">
-                                    <span className="font-medium">{rad.type} H{rad.height_mm}×{rad.length_mm}mm</span>
-                                    <span className="text-emerald-700 mx-2">{out*sr.qty}W</span>
-                                    <div className="flex gap-1 items-center">
-                                      <input type="number" min={1} value={sr.qty} className="w-10 border border-gray-200 rounded px-1 py-0.5 text-xs"
-                                        onChange={e => { const r=[...(selectedRadiators[room.id]||[])]; r[si]={...sr,qty:parseInt(e.target.value)||1}; setSelectedRadiators(p=>({...p,[room.id]:r})) }}/>
-                                      <button onClick={()=>setSelectedRadiators(p=>({...p,[room.id]:(p[room.id]||[]).filter((_,i)=>i!==si)}))} className="text-red-400">✕</button>
-                                    </div>
-                                  </div>
-                                )
-                              })}
-                              <div className="grid grid-cols-2 gap-1.5 max-h-44 overflow-y-auto">
-                                {ULTRAHEAT_RADIATORS.filter(r=>{const o=radOutput(r,deltaT); return o>=room.totalLossW*0.85&&o<=room.totalLossW*2.5})
-                                  .sort((a,b)=>Math.abs(radOutput(a,deltaT)-room.totalLossW)-Math.abs(radOutput(b,deltaT)-room.totalLossW))
-                                  .slice(0,10).map(rad=>{
-                                    const out=radOutput(rad,deltaT); const pct=Math.round((out/room.totalLossW-1)*100)
-                                    return (
-                                      <button key={rad.id} onClick={()=>setSelectedRadiators(p=>({...p,[room.id]:[...(p[room.id]||[]),{id:rad.id,qty:1}]}))}
-                                        className="text-left p-2 border border-gray-200 rounded hover:border-emerald-400 hover:bg-emerald-50">
-                                        <div className="text-xs font-medium">{rad.type}</div>
-                                        <div className="text-xs text-gray-500">H{rad.height_mm}×{rad.length_mm}mm</div>
-                                        <div className="text-xs font-bold text-emerald-700">{out}W</div>
-                                        <div className="text-xs text-gray-400">+{pct}% · {rad.depth_mm}mm</div>
-                                      </button>
-                                    )
-                                  })}
-                              </div>
-                            </div>
-                          )}
+                          <button onClick={() => removeRoom(room.id)}
+                            className="text-xs text-red-500 hover:text-red-700 border border-red-200 px-3 py-1.5 rounded-lg bg-white hover:bg-red-50">
+                            Remove room
+                          </button>
                         </div>
                       </div>
                     )}
                   </div>
                 )
               })}
-
-              {/* Building total */}
-              {rooms.length > 0 && (
-                <div className="bg-emerald-700 text-white rounded-xl p-3 grid grid-cols-2 gap-2 text-xs mt-2">
-                  <div><div className="text-emerald-200">Total heat loss</div><div className="text-base font-bold">{(totalW/1000).toFixed(2)} kW</div></div>
-                  <div><div className="text-emerald-200">Recommended ASHP</div><div className="text-base font-bold">{recKw} kW</div></div>
-                </div>
-              )}
             </div>
 
-            {/* Continue CTA */}
+            {/* Building summary */}
             {rooms.length > 0 && (
-              <div className="pt-2 border-t border-gray-100 space-y-2">
-                <button
-                  onClick={() => save(`/jobs/${jobId}/design/system`)}
-                  disabled={saving}
-                  className="w-full bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-semibold py-3 rounded-xl transition-colors">
-                  {saving ? 'Saving...' : 'Save & continue to system specification →'}
-                </button>
-                {saveError && <div className="text-xs text-red-600 text-center">{saveError}</div>}
-                <div className="text-xs text-gray-400 text-center">
-                  Heat pump selection · radiator sizing · MCS 031 · noise check
+              <div className="mt-4 bg-emerald-700 text-white rounded-2xl p-4">
+                <div className="text-xs font-semibold text-emerald-200 mb-3">Building heat loss summary · BS EN 12831-1:2017</div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div><div className="text-emerald-200 text-xs">Fabric loss</div><div className="font-bold text-lg">{(fabricW/1000).toFixed(2)}kW</div></div>
+                  <div><div className="text-emerald-200 text-xs">Ventilation loss</div><div className="font-bold text-lg">{(ventW/1000).toFixed(2)}kW</div></div>
+                  <div><div className="text-emerald-200 text-xs">Total heat loss</div><div className="font-bold text-2xl">{(totalW/1000).toFixed(2)}kW</div></div>
+                  <div><div className="text-emerald-200 text-xs">Recommended ASHP</div><div className="font-bold text-2xl">{recKw}kW</div></div>
+                </div>
+                <div className="mt-3 pt-3 border-t border-emerald-600 flex items-center justify-between">
+                  <div className="text-xs text-emerald-200">Specific heat loss: <span className="font-semibold text-white">{shl} W/m²</span> · {rooms.length} rooms across {floors.length} floor{floors.length !== 1 ? 's' : ''}</div>
+                  <button onClick={() => save(`/jobs/${jobId}/design/system`)} disabled={saving}
+                    className="bg-white text-emerald-700 font-semibold text-xs px-4 py-2 rounded-lg hover:bg-emerald-50 flex-shrink-0">
+                    {saving ? 'Saving...' : 'Save & continue →'}
+                  </button>
                 </div>
               </div>
             )}
           </div>
+
+          {/* ── Quick-add room panel ────────────────────────────────────────── */}
+          {addingRoom && (
+            <div className="w-72 bg-white border-l border-gray-200 overflow-y-auto flex-shrink-0">
+              <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Add a room</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {activeFloor === 0 ? 'Ground floor' : activeFloor === 1 ? 'First floor' : `Floor ${activeFloor}`}
+                  </div>
+                </div>
+                <button onClick={() => setAddingRoom(false)} className="text-gray-400 hover:text-gray-600 text-lg">✕</button>
+              </div>
+              {/* Floor selector */}
+              <div className="px-4 pt-3 pb-2">
+                <label className="block text-xs text-gray-400 mb-1">Add to floor</label>
+                <div className="flex gap-1 flex-wrap">
+                  {floors.map(f => (
+                    <button key={f} onClick={() => setAddFloor(f)}
+                      className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${addFloor === f ? 'bg-emerald-700 text-white border-emerald-700' : 'border-gray-200 text-gray-600 hover:border-emerald-400'}`}>
+                      {f === 0 ? 'GF' : f === 1 ? 'FF' : `F${f}`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="p-4 pt-2">
+                <div className="text-xs text-gray-400 mb-3">Select room type</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {ROOM_TYPES.map(rt => (
+                    <button key={rt.type} onClick={() => addRoom(rt.type)}
+                      className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 hover:border-emerald-400 hover:bg-emerald-50 transition-colors text-left group">
+                      <span className="text-lg flex-shrink-0">{rt.icon}</span>
+                      <div>
+                        <div className="text-xs font-medium text-gray-800 group-hover:text-emerald-700">{rt.type}</div>
+                        <div className="text-xs text-gray-400">{rt.defaultTemp}°C</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
