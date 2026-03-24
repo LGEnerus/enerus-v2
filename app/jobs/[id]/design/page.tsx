@@ -369,6 +369,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           const updated = rooms.map(r => r.id !== fr[i].id ? r : { ...r, elements: [...r.elements, el] })
           onRoomsChange(updated)
           onSelect(fr[i].id, 'element', el.id)
+          setTool('select')
           return
         }
       }
@@ -504,6 +505,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         }
         commit([...rooms, nr])
         onSelect(id)
+        setTool('select')
       }
       setDrawStart(null)
       setDrawCurrent(null)
@@ -513,7 +515,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
   }
 
   function onDoubleClick(e: React.MouseEvent) {
-    if (tool !== 'select' || !selectedId) return
+    if (['draw','addWindow','addDoor','addRadiator','addUFH'].includes(tool) || !selectedId) return
     const pxPt = getPxPt(e)
     const room = rooms.find(r => r.id === selectedId); if (!room) return
     // Double-click on wall edge → insert vertex (makes L-shapes)
@@ -611,12 +613,12 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
     const lblSz = Math.max(7, Math.min(12, mmToPx(1400, vp.zoom)))
 
     return (
-      <g key={isGhost ? `ghost_${room.id}` : room.id} opacity={isGhost ? 0.25 : 1}>
+      <g key={isGhost ? `ghost_${room.id}` : room.id} opacity={isGhost ? 0.35 : 1}>
         {/* Fill */}
         <polygon points={ptsStr} fill={fillColor}
           stroke={isGhost ? '#9ca3af' : isSel ? '#059669' : 'none'}
           strokeWidth={isSel ? 0 : 0}
-          style={{ cursor: isGhost ? 'default' : tool === 'select' ? 'move' : 'crosshair' }}/>
+          style={{ cursor: isGhost ? 'default' : ['addWindow','addDoor','addRadiator','addUFH'].includes(tool) ? 'crosshair' : 'move' }}/>
 
         {/* Walls */}
         {!isGhost && room.vertices.map((v, wi) => {
@@ -639,8 +641,9 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
               />
               {/* Visual wall */}
               <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                stroke={isSelWall ? '#f59e0b' : color} strokeWidth={isSel ? width+1 : width}
-                strokeDasharray={WALL_DASH[wt]}
+                stroke={isGhost ? '#93c5fd' : isSelWall ? '#f59e0b' : color}
+                strokeWidth={isGhost ? 1.5 : isSel ? width+1 : width}
+                strokeDasharray={isGhost ? '6,4' : WALL_DASH[wt]}
                 style={{ pointerEvents: 'none' }}/>
               {/* Dimension */}
               {showDims && isSel && pxLen > 45 && (() => {
@@ -720,12 +723,23 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         {!isGhost && room.elements.map(el => {
           const a = toScreen(room.vertices[el.wallIndex], vp)
           const b = toScreen(room.vertices[(el.wallIndex+1)%room.vertices.length], vp)
-          const ex = a.x + el.position*(b.x-a.x), ey = a.y + el.position*(b.y-a.y)
+          // Base position on wall
+          const ex0 = a.x + el.position*(b.x-a.x), ey0 = a.y + el.position*(b.y-a.y)
           const wPx = mmToPx(el.widthMm, vp.zoom)
           const col = EL_COLOR[el.type] || '#6b7280'
           const isSel2 = selectedElementId === el.id
           const dx = b.x-a.x, dy = b.y-a.y, len = Math.sqrt(dx**2+dy**2)
           const angle = len > 0 ? Math.atan2(dy, dx) * 180/Math.PI : 0
+          // Radiators offset inward (toward room interior) by wall thickness ~100mm
+          const insetPx = el.type === 'radiator' ? mmToPx(100, vp.zoom) : 0
+          // Inward normal (pointing into room interior)
+          const nx = len > 0 ? -dy/len : 0, ny = len > 0 ? dx/len : 0
+          // Check which side is interior using room centroid
+          const centroidW = polyCentroid(room.vertices.map(v => toScreen(v, vp)))
+          const dotToCenter = (centroidW.x - ex0) * nx + (centroidW.y - ey0) * ny
+          const inwardSign = dotToCenter >= 0 ? 1 : -1
+          const ex = ex0 + nx * insetPx * inwardSign
+          const ey = ey0 + ny * insetPx * inwardSign
           return (
             <g key={el.id} transform={`translate(${ex},${ey}) rotate(${angle})`}
               style={{ cursor:'pointer' }}
@@ -755,13 +769,13 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
   }
 
   const floorRooms = rooms.filter(r => r.floor === activeFloor)
-  const ghostRooms = rooms.filter(r => r.floor === activeFloor - 1)
+  const ghostRooms = rooms.filter(r => r.floor < activeFloor)
 
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-gray-50 select-none"
       style={{ touchAction: 'none' }}>
       <svg ref={svgRef} width={size.w} height={size.h}
-        style={{ display:'block', cursor: tool==='draw'?'crosshair':tool==='pan'?'grab':'default' }}
+        style={{ display:'block', cursor: tool==='draw'?'crosshair':['addWindow','addDoor','addRadiator','addUFH'].includes(tool)?'crosshair':'default' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -812,8 +826,8 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         {/* Context hint */}
         <text x={10} y={16} fontSize={10} fill="#9ca3af">
           {tool==='draw' && 'Click and drag to draw a room'}
-          {tool==='select' && !selectedId && 'Click a room to select · Drag to move'}
-          {tool==='select' && selectedId && 'Drag corner to resize · Drag wall to push/pull · Dbl-click wall edge to add vertex · Right-click wall for type'}
+          {tool!=='draw' && !['addWindow','addDoor','addRadiator','addUFH'].includes(tool) && !selectedId && 'Click a room to select · Drag to move'}
+          {tool!=='draw' && !['addWindow','addDoor','addRadiator','addUFH'].includes(tool) && selectedId && 'Drag corner to resize · Drag wall to push/pull · Dbl-click wall edge to add vertex · Right-click wall for type'}
           {(tool==='addWindow'||tool==='addDoor'||tool==='addRadiator'||tool==='addUFH') && `Click on a wall to place · Right-click element to delete`}
         </text>
       </svg>
@@ -1172,9 +1186,7 @@ export default function DesignPage() {
   const lbl = "block text-xs font-medium text-gray-500 mb-1"
 
   const TOOLS: { id: CanvasTool; icon: string; label: string; color?: string }[] = [
-    { id: 'select',      icon: '↖',  label: 'Select' },
     { id: 'draw',        icon: '⬛', label: 'Draw room' },
-    { id: 'pan',         icon: '✋', label: 'Pan' },
     { id: 'addWindow',   icon: '🪟', label: 'Window',   color: 'text-blue-600' },
     { id: 'addDoor',     icon: '🚪', label: 'Door',     color: 'text-amber-600' },
     { id: 'addRadiator', icon: '🔥', label: 'Radiator', color: 'text-red-600' },
