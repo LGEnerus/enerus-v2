@@ -37,7 +37,7 @@ export type CanvasRoom = {
 
 export type CanvasTool =
   | 'select' | 'draw' | 'addWindow' | 'addDoor'
-  | 'addRadiator' | 'addUFH' | 'pan'
+  | 'addRadiator' | 'addUFH' | 'pan' | 'drawInsul'
 
 export type Viewport = { x: number; y: number; zoom: number }
 
@@ -165,7 +165,7 @@ const WALL_COLOR: Record<WallType, string> = {
   external: '#1f2937', internal: '#9ca3af', party: '#7c3aed', open: '#d1d5db'
 }
 const WALL_WIDTH: Record<WallType, number> = {
-  external: 4, internal: 1.5, party: 3, open: 1
+  external: 6, internal: 3, party: 4, open: 1.5
 }
 const WALL_DASH: Record<WallType, string> = {
   external: 'none', internal: '5,3', party: '10,4', open: '3,3'
@@ -348,7 +348,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
     }
 
     // ── Draw room (click-drag rectangle) ──────────────────────────────────────
-    if (tool === 'draw') {
+    if (tool === 'draw' || tool === 'drawInsul') {
       setDrawStart(worldPt)
       setDrawCurrent(worldPt)
       return
@@ -356,7 +356,35 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
 
     // ── Place element on wall ─────────────────────────────────────────────────
     if (tool === 'addWindow' || tool === 'addDoor' || tool === 'addRadiator' || tool === 'addUFH') {
-      const type = tool === 'addWindow' ? 'window' : tool === 'addDoor' ? 'door' : tool === 'addRadiator' ? 'radiator' : 'ufh'
+      const type = tool === 'addWindow' ? 'window' : tool === 'addDoor' ? 'door' : 'radiator'
+
+      // UFH: click inside room to toggle UFH on that room (floor region, not wall element)
+      if (tool === 'addUFH') {
+        for (let i = fr.length-1; i >= 0; i--) {
+          if (ptInPoly(worldPt, fr[i].vertices)) {
+            const hasUfh = fr[i].elements.some(e => e.type === 'ufh')
+            if (hasUfh) {
+              // Remove UFH from this room
+              onRoomsChange(rooms.map(r => r.id !== fr[i].id ? r : {
+                ...r, elements: r.elements.filter(e => e.type !== 'ufh')
+              }))
+            } else {
+              // Add UFH zone covering the room floor
+              const el: WallElement = {
+                id: `ufh_${Date.now()}`, wallIndex: 0, position: 0.5,
+                type: 'ufh', widthMm: 1000, heightMm: 1000,
+              }
+              onRoomsChange(rooms.map(r => r.id !== fr[i].id ? r : { ...r, elements: [...r.elements, el] }))
+            }
+            onSelect(fr[i].id)
+            onToolChange('select')
+            return
+          }
+        }
+        return
+      }
+
+      // Window / door / radiator: place on wall
       for (let i = fr.length-1; i >= 0; i--) {
         const wi = hitWall(pxPt, fr[i])
         if (wi >= 0) {
@@ -364,7 +392,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           const pos = ptToSegParam(worldPt, a, b)
           const el: WallElement = {
             id: `el_${Date.now()}`, wallIndex: wi, position: Math.max(0.05, Math.min(0.95, pos)),
-            type, widthMm: type === 'door' ? 900 : type === 'ufh' ? 2000 : 1200,
+            type, widthMm: type === 'door' ? 900 : 1200,
             heightMm: type === 'door' ? 2100 : 1200, uValue: type === 'window' ? 2.0 : undefined,
           }
           const updated = rooms.map(r => r.id !== fr[i].id ? r : { ...r, elements: [...r.elements, el] })
@@ -477,18 +505,29 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
       const room = rooms.find(r => r.id === drag.id)
       const el = room?.elements.find(e => e.id === drag.elemId)
       if (!room || !el) return
-      const a = room.vertices[el.wallIndex]
-      const b = room.vertices[(el.wallIndex+1)%room.vertices.length]
-      const pos = ptToSegParam(worldPt, a, b)
+      // Find nearest wall to current cursor position
+      let bestWall = el.wallIndex, bestDist = Infinity, bestPos = el.position
+      for (let wi = 0; wi < room.vertices.length; wi++) {
+        const a = room.vertices[wi], b = room.vertices[(wi+1)%room.vertices.length]
+        const pxA = toScreen(a, vp), pxB = toScreen(b, vp)
+        const d = ptToSegDist(pxPt, pxA, pxB)
+        if (d < bestDist) {
+          bestDist = d
+          bestWall = wi
+          bestPos = Math.max(0.05, Math.min(0.95, ptToSegParam(worldPt, a, b)))
+        }
+      }
       onRoomsChange(rooms.map(r => r.id !== drag.id ? r : {
-        ...r, elements: r.elements.map(e => e.id !== drag.elemId ? e : { ...e, position: Math.max(0.05, Math.min(0.95, pos)) })
+        ...r, elements: r.elements.map(e => e.id !== drag.elemId ? e : {
+          ...e, wallIndex: bestWall, position: bestPos
+        })
       }))
       return
     }
   }
 
   function onPointerUp(e: React.PointerEvent) {
-    // Finish drawing
+    // Finish drawing room
     if (tool === 'draw' && drawStart && drawCurrent) {
       const w = Math.abs(drawCurrent.x - drawStart.x)
       const h = Math.abs(drawCurrent.y - drawStart.y)
@@ -507,6 +546,29 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         commit([...rooms, nr])
         onSelect(id)
         onToolChange('select')
+      }
+      setDrawStart(null)
+      setDrawCurrent(null)
+      return
+    }
+    // Finish drawing insulation region
+    if (tool === 'drawInsul' && drawStart && drawCurrent) {
+      const w = Math.abs(drawCurrent.x - drawStart.x)
+      const h = Math.abs(drawCurrent.y - drawStart.y)
+      if (w > 200 && h > 200 && drawingInsulFloor !== null) {
+        const x1 = Math.min(drawStart.x, drawCurrent.x)
+        const y1 = Math.min(drawStart.y, drawCurrent.y)
+        const x2 = Math.max(drawStart.x, drawCurrent.x)
+        const y2 = Math.max(drawStart.y, drawCurrent.y)
+        setInsulRegions(prev => [...prev, {
+          id: `insul_${Date.now()}`,
+          floor: drawingInsulFloor,
+          vertices: [{ x:x1,y:y1 }, { x:x2,y:y1 }, { x:x2,y:y2 }, { x:x1,y:y2 }],
+          uValue: insulLayers.find(il => il.betweenFloors[1] === drawingInsulFloor || il.betweenFloors[0] === drawingInsulFloor)?.uValue || 0.25,
+          type: drawingInsulType,
+        }])
+        onToolChange('select')
+        setDrawingInsulFloor(null)
       }
       setDrawStart(null)
       setDrawCurrent(null)
@@ -642,9 +704,9 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
               />
               {/* Visual wall */}
               <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                stroke={isGhost ? '#93c5fd' : isSelWall ? '#f59e0b' : color}
-                strokeWidth={isGhost ? 1.5 : isSel ? width+1 : width}
-                strokeDasharray={isGhost ? '6,4' : WALL_DASH[wt]}
+                stroke={isGhost ? '#3b82f6' : isSelWall ? '#f59e0b' : color}
+                strokeWidth={isGhost ? 2 : isSel ? width+1 : width}
+                strokeDasharray={isGhost ? '5,3' : WALL_DASH[wt]}
                 style={{ pointerEvents: 'none' }}/>
               {/* Dimension */}
               {showDims && isSel && pxLen > 45 && (() => {
@@ -662,6 +724,15 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           )
         })}
 
+        {/* Ghost room name label */}
+        {isGhost && lblSz > 6 && (
+          <text x={centroid.x} y={centroid.y}
+            textAnchor="middle" dominantBaseline="middle"
+            fontSize={Math.max(7, lblSz*0.8)} fill="#3b82f6" opacity={0.7}
+            style={{ pointerEvents:'none', userSelect:'none' }}>
+            {room.name || room.roomType}
+          </text>
+        )}
         {/* Labels */}
         {!isGhost && lblSz > 6 && (
           <text x={centroid.x} y={centroid.y - (showHeatLoss && room.heatLossW ? lblSz*0.6 : 0)}
@@ -720,8 +791,25 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           )
         })}
 
-        {/* Elements */}
-        {!isGhost && room.elements.map(el => {
+        {/* UFH floor overlay */}
+        {!isGhost && room.elements.some(e => e.type === 'ufh') && (() => {
+          const ptsStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+          return (
+            <g style={{ pointerEvents: 'none' }}>
+              <polygon points={ptsStr} fill="#10b981" fillOpacity={0.15}/>
+              <polygon points={ptsStr} fill="none" stroke="#10b981" strokeWidth={2} strokeDasharray="8,4"/>
+              <text x={centroid.x} y={centroid.y + (room.heatLossW ? 18 : 8)}
+                textAnchor="middle" dominantBaseline="middle"
+                fontSize={10} fill="#059669" fontWeight="600"
+                style={{ userSelect:'none' }}>
+                ♨ UFH
+              </text>
+            </g>
+          )
+        })()}
+
+        {/* Wall Elements (windows, doors, radiators — excluding UFH) */}
+        {!isGhost && room.elements.filter(e => e.type !== 'ufh').map(el => {
           const a = toScreen(room.vertices[el.wallIndex], vp)
           const b = toScreen(room.vertices[(el.wallIndex+1)%room.vertices.length], vp)
           // Base position on wall
@@ -776,7 +864,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
     <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-gray-50 select-none"
       style={{ touchAction: 'none' }}>
       <svg ref={svgRef} width={size.w} height={size.h}
-        style={{ display:'block', cursor: tool==='draw'?'crosshair':['addWindow','addDoor','addRadiator','addUFH'].includes(tool)?'crosshair':'default' }}
+        style={{ display:'block', cursor: (tool==='draw'||tool==='drawInsul')?'crosshair':['addWindow','addDoor','addRadiator','addUFH'].includes(tool)?'crosshair':'default' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -791,6 +879,42 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
 
         {/* Ghost — floor below */}
         {ghostRooms.map(r => renderRoom(r, true))}
+
+        {/* Insulation regions */}
+        {insulRegions.filter(ir => ir.floor === activeFloor).map(ir => {
+          const pts = ir.vertices.map(v => toScreen(v, vp))
+          const ptsStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+          const c = polyCentroid(pts)
+          const col = ir.type === 'ceiling' ? '#3b82f6' : '#f59e0b'
+          const label = ir.type === 'ceiling' ? 'Ceiling ins' : 'Floor ins'
+          return (
+            <g key={ir.id}>
+              <polygon points={ptsStr} fill={col} fillOpacity={0.12}
+                stroke={col} strokeWidth={2} strokeDasharray="8,4"/>
+              <text x={c.x} y={c.y} textAnchor="middle" dominantBaseline="middle"
+                fontSize={10} fill={col} fontWeight="600" style={{ pointerEvents:'none', userSelect:'none' }}>
+                {label} U{ir.uValue}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Draw insulation preview */}
+        {tool === 'drawInsul' && drawStart && drawCurrent && (() => {
+          const a = toScreen(drawStart, vp), b = toScreen(drawCurrent, vp)
+          const x = Math.min(a.x,b.x), y = Math.min(a.y,b.y)
+          const w = Math.abs(b.x-a.x), h = Math.abs(b.y-a.y)
+          const col = drawingInsulType === 'ceiling' ? '#3b82f6' : '#f59e0b'
+          const label = drawingInsulType === 'ceiling' ? 'Ceiling insulation' : 'Floor insulation'
+          return (
+            <g>
+              <rect x={x} y={y} width={w} height={h}
+                fill={col} fillOpacity={0.15} stroke={col} strokeWidth={2} strokeDasharray="8,4"/>
+              {w > 80 && <text x={x+w/2} y={y+h/2} textAnchor="middle" dominantBaseline="middle"
+                fontSize={11} fill={col} fontWeight="600">{label}</text>}
+            </g>
+          )
+        })()}
 
         {/* Active floor rooms — non-selected first, selected on top */}
         {floorRooms.filter(r => r.id !== selectedId).map(r => renderRoom(r))}
@@ -827,6 +951,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         {/* Context hint */}
         <text x={10} y={16} fontSize={10} fill="#9ca3af">
           {tool==='draw' && 'Click and drag to draw a room'}
+          {tool==='drawInsul' && `Click and drag to draw ${drawingInsulType} insulation region`}
           {tool!=='draw' && !['addWindow','addDoor','addRadiator','addUFH'].includes(tool) && !selectedId && 'Click a room to select · Drag to move'}
           {tool!=='draw' && !['addWindow','addDoor','addRadiator','addUFH'].includes(tool) && selectedId && 'Drag corner to resize · Drag wall to push/pull · Dbl-click wall edge to add vertex · Right-click wall for type'}
           {(tool==='addWindow'||tool==='addDoor'||tool==='addRadiator'||tool==='addUFH') && `Click on a wall to place · Right-click element to delete`}
@@ -1027,6 +1152,12 @@ export default function DesignPage() {
   const [showHeatLoss, setShowHeatLoss] = useState(true)
   const [bgImage, setBgImage] = useState<string | undefined>()
   const [showLayerFAB, setShowLayerFAB] = useState(false)
+  const [floorNames, setFloorNames] = useState<Record<number,string>>({ 0: 'Ground floor' })
+  const [editingFloorName, setEditingFloorName] = useState<number | null>(null)
+  const [insulLayers, setInsulLayers] = useState<Array<{id:string;betweenFloors:[number,number];label:string;uValue:number}>>([])
+  const [insulRegions, setInsulRegions] = useState<Array<{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling'}>>([])
+  const [drawingInsulFloor, setDrawingInsulFloor] = useState<number | null>(null)
+  const [drawingInsulType, setDrawingInsulType] = useState<'floor'|'ceiling'>('floor')
   const [showRoomPicker, setShowRoomPicker] = useState(false)
   const [customer, setCustomer] = useState<any>(null)
   const [existingDesign, setExistingDesign] = useState<any>(null)
@@ -1129,8 +1260,21 @@ export default function DesignPage() {
   }
 
   function addFloor() {
-    const maxFloor = rooms.length > 0 ? Math.max(...rooms.map(r => r.floor)) : -1
-    setActiveFloor(maxFloor + 1)
+    const maxFloor = Math.max(0, ...[0, ...rooms.map(r => r.floor)])
+    const newFloor = maxFloor + 1
+    const floorLabel = newFloor === 1 ? 'First floor' : newFloor === 2 ? 'Second floor' : newFloor === 3 ? 'Third floor' : `Floor ${newFloor}`
+    setFloorNames(prev => ({ ...prev, [newFloor]: floorLabel }))
+    setInsulLayers(prev => [...prev, {
+      id: `ins_${Date.now()}`,
+      betweenFloors: [maxFloor, newFloor] as [number,number],
+      label: `Floor/ceiling insulation (between ${floorNames[maxFloor] || `Floor ${maxFloor}`} and ${floorLabel})`,
+      uValue: 0.25,
+    }])
+    setActiveFloor(newFloor)
+  }
+
+  function getFloorName(f: number): string {
+    return floorNames[f] || (f === 0 ? 'Ground floor' : f === 1 ? 'First floor' : f === 2 ? 'Second floor' : `Floor ${f}`)
   }
 
   const floors = Array.from(new Set([0, ...rooms.map(r => r.floor)])).sort((a,b) => a-b)
@@ -1264,12 +1408,12 @@ export default function DesignPage() {
       <div className="flex flex-1 overflow-hidden">
 
         {/* ── Left tool palette ────────────────────────────────────────────── */}
-        <div className="w-14 bg-white border-r border-gray-200 flex flex-col items-center py-3 gap-1 flex-shrink-0">
+        <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-3 gap-1.5 flex-shrink-0">
           {TOOLS.map(t => (
             <button key={t.id} onClick={() => setTool(t.id)} title={t.label}
-              className={`w-10 h-10 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors ${tool === t.id ? 'bg-emerald-700 text-white shadow-sm' : `bg-white ${t.color || 'text-gray-600'} hover:bg-gray-100 border border-gray-200`}`}>
-              <span className="text-base leading-none">{t.icon}</span>
-              <span className="text-xs leading-none" style={{ fontSize: '7px' }}>{t.label.split(' ')[0]}</span>
+              className={`w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors ${tool === t.id ? 'bg-emerald-700 text-white shadow-md' : `bg-white ${t.color || 'text-gray-600'} hover:bg-gray-50 border border-gray-200`}`}>
+              <span className="text-2xl leading-none">{t.icon}</span>
+              <span className="font-medium" style={{ fontSize: '8px' }}>{t.label.split(' ')[0]}</span>
             </button>
           ))}
 
@@ -1324,68 +1468,160 @@ export default function DesignPage() {
             selectedElementId={selectedElementId}
           />
 
-          {/* ── Layer FAB (bottom right) ──────────────────────────────────── */}
-          <div className="absolute bottom-6 right-4 flex flex-col items-end gap-2">
+          {/* ── Layer panel (bottom right) ──────────────────────────────── */}
+          <div className="absolute bottom-4 right-4 flex flex-col items-end gap-2">
             {showLayerFAB && (
-              <div className="bg-white border border-gray-200 rounded-2xl shadow-xl overflow-hidden min-w-[200px]">
-                <div className="px-3 py-2 bg-gray-50 border-b border-gray-100">
-                  <div className="text-xs font-semibold text-gray-700">Building layers</div>
+              <div className="bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden w-72">
+                {/* Panel header */}
+                <div className="px-4 py-3 bg-emerald-700 text-white flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-bold">Building layers</div>
+                    <div className="text-xs text-emerald-200">{rooms.length} rooms · {(totalW/1000).toFixed(1)}kW total</div>
+                  </div>
+                  <button onClick={() => setShowLayerFAB(false)} className="text-emerald-200 hover:text-white text-lg">✕</button>
                 </div>
-                {/* Layer stack — top to bottom */}
-                <div className="p-2 space-y-1">
-                  {/* Roof/loft layer */}
-                  <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-gray-50 border border-gray-200">
-                    <span className="text-sm">🏠</span>
-                    <span className="text-xs text-gray-500 flex-1">Roof / loft</span>
-                    <a href={`/jobs/${jobId}/noise`} className="text-xs text-gray-400 hover:text-emerald-700">Noise →</a>
+
+                <div className="p-3 space-y-1.5 max-h-[60vh] overflow-y-auto">
+
+                  {/* Roof */}
+                  <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200">
+                    <span className="text-lg">🏠</span>
+                    <div className="flex-1">
+                      <div className="text-xs font-semibold text-gray-700">Roof / loft</div>
+                      <div className="text-xs text-gray-400">See noise assessment</div>
+                    </div>
+                    <a href={`/jobs/${jobId}/noise`} onClick={() => setShowLayerFAB(false)}
+                      className="text-xs text-emerald-700 hover:underline">MCS 020 →</a>
                   </div>
 
-                  {/* Floors in reverse (top floor first) */}
-                  {[...floors].reverse().map(f => {
+                  {/* Floor stack — top to bottom */}
+                  {[...floors].reverse().map((f, fi) => {
                     const fRooms = rooms.filter(r => r.floor === f)
                     const fTotal = fRooms.reduce((s,r) => s+(r.heatLossW||0), 0)
                     const isActive = f === activeFloor
+                    const insul = insulLayers.find(il => il.betweenFloors[1] === f)
+                    const floorName = getFloorName(f)
+
                     return (
-                      <button key={f} onClick={() => { setActiveFloor(f); setShowLayerFAB(false) }}
-                        className={`w-full flex items-center gap-2 px-2 py-2 rounded-xl border-2 transition-colors ${isActive ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-white hover:border-emerald-300'}`}>
-                        <span className="text-sm">{f === 0 ? '🏡' : '🏢'}</span>
-                        <div className="flex-1 text-left">
-                          <div className="text-xs font-semibold text-gray-800">
-                            {f === 0 ? 'Ground floor' : f === 1 ? 'First floor' : f === 2 ? 'Second floor' : `Floor ${f}`}
+                      <div key={f} className="space-y-1">
+                        {/* Insulation layer above this floor */}
+                        {insul && (
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200">
+                              <span className="text-base">🏗</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-xs font-medium text-amber-800">Floor / ceiling insulation</div>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                  <span className="text-xs text-amber-600">Default U:</span>
+                                  <input type="number" step={0.01} value={insul.uValue}
+                                    className="w-14 text-xs border border-amber-300 rounded px-1 py-0.5 bg-white"
+                                    onChange={e => setInsulLayers(prev => prev.map(il =>
+                                      il.id !== insul.id ? il : { ...il, uValue: parseFloat(e.target.value)||0.25 }
+                                    ))}/>
+                                  <span className="text-xs text-amber-600">W/m²K</span>
+                                </div>
+                              </div>
+                            </div>
+                            {/* Drawn insulation regions for this floor */}
+                            {insulRegions.filter(ir => ir.floor === f).length > 0 && (
+                              <div className="pl-4 space-y-1">
+                                {insulRegions.filter(ir => ir.floor === f).map(ir => (
+                                  <div key={ir.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white border border-amber-200 text-xs">
+                                    <span>{ir.type === 'ceiling' ? '⬆' : '⬇'}</span>
+                                    <span className="flex-1 text-amber-700 capitalize">{ir.type} region</span>
+                                    <input type="number" step={0.01} value={ir.uValue}
+                                      className="w-12 border border-amber-200 rounded px-1 py-0.5"
+                                      onChange={e => setInsulRegions(prev => prev.map(r =>
+                                        r.id !== ir.id ? r : { ...r, uValue: parseFloat(e.target.value)||0.25 }
+                                      ))}/>
+                                    <button onClick={() => setInsulRegions(prev => prev.filter(r => r.id !== ir.id))}
+                                      className="text-red-400 hover:text-red-600 ml-1">✕</button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
-                          <div className="text-xs text-gray-400">{fRooms.length} rooms · {(fTotal/1000).toFixed(1)}kW</div>
-                        </div>
-                        {isActive && <span className="text-emerald-600 text-xs">●</span>}
-                      </button>
+                        )}
+
+                        {/* Floor rooms layer */}
+                        <button onClick={() => { setActiveFloor(f); setShowLayerFAB(false) }}
+                          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl border-2 transition-all ${isActive ? 'border-emerald-500 bg-emerald-50 shadow-sm' : 'border-gray-200 bg-white hover:border-emerald-300'}`}>
+                          <span className="text-lg">{f === 0 ? '🏡' : '🏢'}</span>
+                          <div className="flex-1 text-left min-w-0">
+                            {editingFloorName === f ? (
+                              <input type="text" value={floorName} autoFocus
+                                className="text-xs font-semibold w-full border border-emerald-400 rounded px-1 py-0.5"
+                                onChange={e => setFloorNames(prev => ({ ...prev, [f]: e.target.value }))}
+                                onBlur={() => setEditingFloorName(null)}
+                                onKeyDown={e => { if (e.key === 'Enter') setEditingFloorName(null) }}
+                                onClick={e => e.stopPropagation()}/>
+                            ) : (
+                              <div className="text-xs font-semibold text-gray-900 flex items-center gap-1">
+                                {floorName}
+                                <button onClick={e => { e.stopPropagation(); setEditingFloorName(f) }}
+                                  className="text-gray-300 hover:text-gray-500 ml-1">✏</button>
+                              </div>
+                            )}
+                            <div className="text-xs text-gray-400">{fRooms.length} room{fRooms.length !== 1 ? 's' : ''} · {(fTotal/1000).toFixed(1)}kW</div>
+                          </div>
+                          {isActive && <span className="text-emerald-600">●</span>}
+                        </button>
+                      </div>
                     )
                   })}
 
-                  {/* Add floor */}
-                  <button onClick={() => { addFloor(); setShowLayerFAB(false) }}
-                    className="w-full flex items-center gap-2 px-2 py-2 rounded-xl border-2 border-dashed border-gray-300 text-gray-400 hover:border-emerald-400 hover:text-emerald-600 transition-colors">
-                    <span className="text-sm">+</span>
-                    <span className="text-xs">Add floor</span>
-                  </button>
-
-                  {/* Foundation */}
-                  <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-gray-100 border border-gray-200">
-                    <span className="text-sm">🪨</span>
-                    <span className="text-xs text-gray-400 flex-1">Foundation / ground</span>
+                  {/* Ground floor construction */}
+                  <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-stone-50 border border-stone-200">
+                    <span className="text-base">🪨</span>
+                    <div className="flex-1">
+                      <div className="text-xs font-semibold text-stone-700">Ground floor construction</div>
+                      <div className="text-xs text-stone-400">Set per-room in room properties</div>
+                    </div>
                   </div>
                 </div>
 
-                {/* Active floor info */}
-                <div className="px-3 py-2 bg-emerald-700 text-white">
-                  <div className="text-xs text-emerald-200">Viewing: {activeFloor === 0 ? 'Ground floor' : activeFloor === 1 ? 'First floor' : `Floor ${activeFloor}`}</div>
-                  <div className="text-xs font-semibold">{rooms.filter(r=>r.floor===activeFloor).length} rooms · {(rooms.filter(r=>r.floor===activeFloor).reduce((s,r)=>s+(r.heatLossW||0),0)/1000).toFixed(1)}kW</div>
+                {/* Actions */}
+                <div className="px-3 py-3 border-t border-gray-100 space-y-2">
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Add layers</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={() => { addFloor() }}
+                      className="flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border-2 border-dashed border-emerald-300 hover:border-emerald-500 hover:bg-emerald-50 transition-colors text-emerald-700">
+                      <span className="text-xl">🏢</span>
+                      <span className="text-xs font-medium">Add floor level</span>
+                    </button>
+                    <button onClick={() => {
+                      setDrawingInsulFloor(activeFloor)
+                      setDrawingInsulType('floor')
+                      setTool('drawInsul')
+                      setShowLayerFAB(false)
+                    }} className="flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border-2 border-dashed border-amber-300 hover:border-amber-500 hover:bg-amber-50 transition-colors text-amber-700">
+                      <span className="text-xl">🏗</span>
+                      <span className="text-xs font-medium text-center">Draw floor insulation</span>
+                    </button>
+                    <button onClick={() => {
+                      setDrawingInsulFloor(activeFloor)
+                      setDrawingInsulType('ceiling')
+                      setTool('drawInsul')
+                      setShowLayerFAB(false)
+                    }} className="flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border-2 border-dashed border-blue-300 hover:border-blue-500 hover:bg-blue-50 transition-colors text-blue-700">
+                      <span className="text-xl">⬛</span>
+                      <span className="text-xs font-medium text-center">Draw ceiling insulation</span>
+                    </button>
+                    <a href={`/jobs/${jobId}/noise`} onClick={() => setShowLayerFAB(false)}
+                      className="flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border-2 border-dashed border-gray-300 hover:border-gray-400 hover:bg-gray-50 transition-colors text-gray-600">
+                      <span className="text-xl">🔊</span>
+                      <span className="text-xs font-medium text-center">Noise assessment</span>
+                    </a>
+                  </div>
                 </div>
               </div>
             )}
 
             {/* FAB button */}
             <button onClick={() => setShowLayerFAB(p => !p)}
-              className={`w-12 h-12 rounded-full shadow-xl flex items-center justify-center text-xl transition-all ${showLayerFAB ? 'bg-emerald-700 text-white' : 'bg-white border-2 border-gray-200 text-gray-600 hover:border-emerald-400'}`}>
-              {showLayerFAB ? '✕' : '🏗'}
+              className={`w-14 h-14 rounded-full shadow-xl flex flex-col items-center justify-center gap-0.5 transition-all ${showLayerFAB ? 'bg-emerald-700 text-white' : 'bg-white border-2 border-gray-200 text-gray-700 hover:border-emerald-400 hover:bg-emerald-50'}`}>
+              <span className="text-xl">{showLayerFAB ? '✕' : '🏗'}</span>
+              {!showLayerFAB && <span className="text-xs font-medium" style={{fontSize:'9px'}}>Layers</span>}
             </button>
           </div>
 
