@@ -196,13 +196,14 @@ type Props = {
   bgImage?: string
   onRoomsChange: (rooms: CanvasRoom[]) => void
   onSelect: (id: string | null, type?: 'room' | 'element', elementId?: string) => void
+  onToolChange: (tool: CanvasTool) => void
   selectedId: string | null
   selectedElementId: string | null
 }
 
 const DesignCanvas = forwardRef<CanvasRef, Props>(({
   rooms, activeFloor, tool, gridMm, showGrid, showDims, showHeatLoss,
-  bgImage, onRoomsChange, onSelect, selectedId, selectedElementId,
+  bgImage, onRoomsChange, onSelect, onToolChange, selectedId, selectedElementId,
 }, ref) => {
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -369,7 +370,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           const updated = rooms.map(r => r.id !== fr[i].id ? r : { ...r, elements: [...r.elements, el] })
           onRoomsChange(updated)
           onSelect(fr[i].id, 'element', el.id)
-          setTool('select')
+          onToolChange('select')
           return
         }
       }
@@ -505,7 +506,7 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         }
         commit([...rooms, nr])
         onSelect(id)
-        setTool('select')
+        onToolChange('select')
       }
       setDrawStart(null)
       setDrawCurrent(null)
@@ -1318,6 +1319,7 @@ export default function DesignPage() {
             bgImage={bgImage}
             onRoomsChange={handleRoomsChange}
             onSelect={handleSelect}
+            onToolChange={setTool}
             selectedId={selectedId}
             selectedElementId={selectedElementId}
           />
