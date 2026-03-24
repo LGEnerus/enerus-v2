@@ -2,350 +2,383 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 
-const emptyProfile = {
-  company_name: '',
-  trading_name: '',
-  director_name: '',
-  companies_house_number: '',
-  address_line1: '',
-  address_line2: '',
-  city: '',
-  postcode: '',
-  phone: '',
-  website: '',
-  mcs_number: '',
-  competencies: [] as string[],
-  coverage_areas: [] as string[],
-  public_liability_expiry: '',
-  employers_liability_expiry: '',
-  umbrella_agreement_signed: false,
-  status: 'incomplete',
-  completion_pct: 0,
-}
-
-type ProfileData = typeof emptyProfile
+const TABS = [
+  { id: 'business',     label: 'Business',      icon: '🏢' },
+  { id: 'accreditation',label: 'Accreditation', icon: '🏅' },
+  { id: 'insurance',    label: 'Insurance',     icon: '🛡' },
+  { id: 'branding',     label: 'Branding',      icon: '🎨' },
+  { id: 'banking',      label: 'Banking',       icon: '🏦' },
+]
 
 export default function ProfilePage() {
-  const [profile, setProfile] = useState<ProfileData>(emptyProfile)
-  const [userId, setUserId] = useState('')
-  const [profileId, setProfileId] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [profile, setProfile] = useState<any>(null)
+  const [user, setUser] = useState<any>(null)
+  const [tab, setTab] = useState('business')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [activeTab, setActiveTab] = useState<'business' | 'compliance' | 'documents'>('business')
+  const [error, setError] = useState('')
+  const [logoPreview, setLogoPreview] = useState<string | null>(null)
+  const [uploadingLogo, setUploadingLogo] = useState(false)
+  const logoRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => {
-    async function load() {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { window.location.replace('/login'); return }
-      setUserId(session.user.id)
+  useEffect(() => { load() }, [])
 
-      const { data } = await supabase
-        .from('installer_profiles')
-        .select('*')
-        .eq('user_id', session.user.id)
-        .single()
-
-      if (data) {
-        const { id, user_id, ...rest } = data as any
-        setProfile({ ...emptyProfile, ...rest })
-        setProfileId(id)
-      }
-      setLoading(false)
-    }
-    load()
-  }, [])
-
-  function calcCompletion(p: ProfileData): number {
-    const checks = [
-      !!p.company_name,
-      !!p.director_name,
-      !!p.address_line1,
-      !!p.city,
-      !!p.postcode,
-      !!p.phone,
-      !!p.mcs_number,
-      (p.competencies?.length ?? 0) > 0,
-      !!p.public_liability_expiry,
-      !!p.employers_liability_expiry,
-      !!p.umbrella_agreement_signed,
-    ]
-    return Math.round((checks.filter(Boolean).length / checks.length) * 100)
-  }
-
-  async function handleSave() {
-    setSaving(true)
-    const pct = calcCompletion(profile)
-    const status = pct === 100 ? 'active' : 'incomplete'
-    const payload: any = { ...profile, completion_pct: pct, status }
-
-    if (profileId) {
-        await (supabase as any)
-        .from('installer_profiles')
-        .update(payload)
-        .eq('id', profileId)
+  async function load() {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) { window.location.replace('/login'); return }
+    setUser(session.user)
+    const { data: ud } = await (supabase as any).from('users').select('*').eq('id', session.user.id).single()
+    const { data: ip } = await (supabase as any).from('installer_profiles').select('*').eq('user_id', session.user.id).single()
+    if (ip) {
+      setProfile(ip)
+      if (ip.logo_url) setLogoPreview(ip.logo_url)
     } else {
-      const { data } = await supabase
-        .from('installer_profiles')
-        .insert({ ...payload, user_id: userId })
-        .select()
-        .single()
-      if (data) setProfileId((data as any).id)
+      // Create empty profile
+      const { data: newProfile } = await (supabase as any).from('installer_profiles')
+        .insert({ user_id: session.user.id, company_name: ud?.full_name || '', status: 'incomplete' })
+        .select().single()
+      setProfile(newProfile || { user_id: session.user.id, company_name: '', status: 'incomplete' })
     }
+  }
 
-    setProfile(prev => ({ ...prev, completion_pct: pct, status }))
+  function upd(updates: any) {
+    setProfile((prev: any) => ({ ...prev, ...updates }))
+  }
+
+  async function uploadLogo(file: File) {
+    if (!user) return
+    setUploadingLogo(true)
+    try {
+      const ext = file.name.split('.').pop()
+      const path = `${user.id}/logo.${ext}`
+      const { error: upErr } = await supabase.storage.from('installer-logos').upload(path, file, { upsert: true })
+      if (upErr) throw upErr
+      const { data: { publicUrl } } = supabase.storage.from('installer-logos').getPublicUrl(path)
+      setLogoPreview(publicUrl)
+      upd({ logo_url: publicUrl })
+    } catch (e: any) { setError(e.message) }
+    setUploadingLogo(false)
+  }
+
+  async function save() {
+    setSaving(true); setError('')
+    try {
+      const { error: e } = await (supabase as any).from('installer_profiles')
+        .upsert({ ...profile, user_id: user?.id, updated_at: new Date().toISOString() })
+      if (e) throw e
+      setSaved(true); setTimeout(() => setSaved(false), 3000)
+    } catch (e: any) { setError(e.message) }
     setSaving(false)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2500)
   }
 
-  function update(field: keyof ProfileData, value: any) {
-    setProfile(prev => ({ ...prev, [field]: value }))
-  }
+  // Completion percentage
+  const fields = [
+    profile?.company_name, profile?.address_line1, profile?.postcode,
+    profile?.phone, profile?.email, profile?.mcs_certificate_number,
+    profile?.public_liability_insurer, profile?.logo_url,
+  ]
+  const completed = fields.filter(Boolean).length
+  const pct = Math.round((completed / fields.length) * 100)
 
-  function toggleCompetency(val: string) {
-    const current = profile.competencies ?? []
-    update('competencies', current.includes(val)
-      ? current.filter((c: string) => c !== val)
-      : [...current, val]
-    )
-  }
+  const inp = "w-full px-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:border-emerald-500 bg-white"
+  const lbl = "block text-xs font-medium text-gray-500 mb-1"
+  const grid2 = "grid grid-cols-1 md:grid-cols-2 gap-4"
 
-  const pct = calcCompletion(profile)
-  const isComplete = pct === 100
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-sm text-gray-400">Loading...</p>
-      </div>
-    )
-  }
+  if (!profile) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><p className="text-sm text-gray-400">Loading...</p></div>
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-emerald-700 rounded-lg flex items-center justify-center">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="white">
-              <path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z" />
-            </svg>
+      {/* Header */}
+      <div className="bg-white border-b border-gray-200 px-4 py-4">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            {/* Logo preview */}
+            <div className="w-16 h-16 rounded-xl border-2 border-gray-200 overflow-hidden flex items-center justify-center bg-gray-50 cursor-pointer"
+              onClick={() => logoRef.current?.click()}>
+              {logoPreview
+                ? <img src={logoPreview} alt="Logo" className="w-full h-full object-contain"/>
+                : <span className="text-2xl">🏢</span>}
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-gray-900">{profile.company_name || 'Your company'}</h1>
+              <div className="flex items-center gap-2 mt-1">
+                <div className="w-32 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${pct}%` }}/>
+                </div>
+                <span className="text-xs text-gray-400">{pct}% complete</span>
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-semibold text-gray-900">Enerus Plus</div>
-            <div className="text-xs text-gray-400 uppercase tracking-wide">MCS Umbrella</div>
+          <div className="flex items-center gap-3">
+            {error && <span className="text-xs text-red-600">{error}</span>}
+            <a href="/dashboard" className="text-xs text-gray-400 hover:text-gray-600">← Dashboard</a>
+            <button onClick={save} disabled={saving}
+              className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-medium px-5 py-2 rounded-xl">
+              {saving ? 'Saving...' : saved ? '✓ Saved' : 'Save changes'}
+            </button>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <a href="/dashboard" className="text-xs text-gray-400 hover:text-gray-600 transition-colors">← Dashboard</a>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-medium px-4 py-2 rounded-lg transition-colors"
-          >
-            {saving ? 'Saving...' : saved ? 'Saved ✓' : 'Save profile'}
-          </button>
         </div>
       </div>
 
-      <div className="max-w-3xl mx-auto px-6 py-8">
-
-        {/* Profile header */}
-        <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center text-emerald-700 font-semibold text-lg">
-                {(profile.company_name || 'E').charAt(0).toUpperCase()}
-              </div>
-              <div>
-                <div className="text-sm font-medium text-gray-900">{profile.company_name || 'Your company name'}</div>
-                <div className="text-xs text-gray-400 mt-0.5">{profile.mcs_number || 'MCS number not set'}</div>
-              </div>
-            </div>
-            <div className={`text-xs font-medium px-3 py-1 rounded-full ${isComplete ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-              {isComplete ? 'Profile complete' : `${pct}% complete`}
+      <div className="max-w-3xl mx-auto px-4 py-6">
+        {/* Status banner */}
+        {profile.status === 'incomplete' && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 flex items-start gap-3">
+            <span className="text-xl">⚠️</span>
+            <div>
+              <div className="text-sm font-semibold text-amber-800">Profile incomplete</div>
+              <div className="text-xs text-amber-700 mt-0.5">Complete your business details, MCS accreditation and insurance information to unlock the full platform.</div>
             </div>
           </div>
-          <div className="w-full bg-gray-100 rounded-full h-2">
-            <div className="bg-emerald-600 h-2 rounded-full transition-all duration-500" style={{ width: `${pct}%` }}/>
+        )}
+        {profile.status === 'active' && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-6 flex items-start gap-3">
+            <span className="text-xl">✅</span>
+            <div>
+              <div className="text-sm font-semibold text-emerald-800">Profile active — MCS umbrella access granted</div>
+              <div className="text-xs text-emerald-700 mt-0.5">MCS: {profile.mcs_certificate_number} · Subscription: {profile.subscription_plan}</div>
+            </div>
           </div>
-          {!isComplete && (
-            <p className="text-xs text-amber-700 mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              Complete all sections below to unlock job processing and the full platform.
-            </p>
-          )}
-        </div>
+        )}
 
         {/* Tabs */}
-        <div className="flex gap-1 bg-gray-100 p-1 rounded-lg mb-6">
-          {(['business', 'compliance', 'documents'] as const).map(tab => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`flex-1 text-xs font-medium py-2 rounded-md transition-colors ${activeTab === tab ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-            >
-              {tab === 'business' ? 'Business details' : tab === 'compliance' ? 'Compliance' : 'Documents'}
+        <div className="flex gap-1 bg-gray-100 rounded-xl p-1 mb-6">
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium transition-colors ${tab === t.id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+              <span>{t.icon}</span><span className="hidden sm:inline">{t.label}</span>
             </button>
           ))}
         </div>
 
-        {/* Business details */}
-        {activeTab === 'business' && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6 space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Company name *</label>
-                <input type="text" value={profile.company_name} onChange={e => update('company_name', e.target.value)} placeholder="Apex Renewables Ltd" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Trading name</label>
-                <input type="text" value={profile.trading_name} onChange={e => update('trading_name', e.target.value)} placeholder="If different from above" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Director name *</label>
-                <input type="text" value={profile.director_name} onChange={e => update('director_name', e.target.value)} placeholder="James Whitfield" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Companies House number</label>
-                <input type="text" value={profile.companies_house_number} onChange={e => update('companies_house_number', e.target.value)} placeholder="14782651" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1.5">Address line 1 *</label>
-              <input type="text" value={profile.address_line1} onChange={e => update('address_line1', e.target.value)} placeholder="14 Forge Street" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1.5">Address line 2</label>
-              <input type="text" value={profile.address_line2} onChange={e => update('address_line2', e.target.value)} placeholder="Optional" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">City *</label>
-                <input type="text" value={profile.city} onChange={e => update('city', e.target.value)} placeholder="Manchester" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Postcode *</label>
-                <input type="text" value={profile.postcode} onChange={e => update('postcode', e.target.value)} placeholder="M1 1AA" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Phone *</label>
-                <input type="tel" value={profile.phone} onChange={e => update('phone', e.target.value)} placeholder="0161 400 7231" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Website</label>
-                <input type="url" value={profile.website} onChange={e => update('website', e.target.value)} placeholder="https://apexrenewables.co.uk" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1.5">MCS number *</label>
-              <input type="text" value={profile.mcs_number} onChange={e => update('mcs_number', e.target.value)} placeholder="MCS/H/12749" className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-2">Competencies *</label>
-              <div className="flex gap-3 flex-wrap">
-                {['ashp', 'gshp', 'exhaust_air'].map(c => (
-                  <button key={c} type="button" onClick={() => toggleCompetency(c)}
-                    className={`text-xs px-4 py-2 rounded-lg border font-medium transition-colors ${
-                      (profile.competencies ?? []).includes(c)
-                        ? 'bg-emerald-700 text-white border-emerald-700'
-                        : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-400'
-                    }`}
-                  >
-                    {c === 'ashp' ? 'Air Source (ASHP)' : c === 'gshp' ? 'Ground Source (GSHP)' : 'Exhaust Air'}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        <div className="bg-white border border-gray-200 rounded-2xl p-6 space-y-4">
 
-        {/* Compliance */}
-        {activeTab === 'compliance' && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6 space-y-5">
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1.5">Public liability insurance expiry *</label>
-              <input type="date" value={profile.public_liability_expiry} onChange={e => update('public_liability_expiry', e.target.value)} className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              <p className="text-xs text-gray-400 mt-1">Minimum £2m public liability cover required</p>
+          {/* Business */}
+          {tab === 'business' && <>
+            <div className={grid2}>
+              <div>
+                <label className={lbl}>Company name *</label>
+                <input type="text" className={inp} value={profile.company_name || ''} onChange={e => upd({ company_name: e.target.value })}/>
+              </div>
+              <div>
+                <label className={lbl}>Trading name (if different)</label>
+                <input type="text" className={inp} value={profile.trading_name || ''} onChange={e => upd({ trading_name: e.target.value })}/>
+              </div>
+            </div>
+            <div className={grid2}>
+              <div>
+                <label className={lbl}>Companies House number</label>
+                <input type="text" className={inp} value={profile.companies_house_number || ''} onChange={e => upd({ companies_house_number: e.target.value })} placeholder="12345678"/>
+              </div>
+              <div>
+                <label className={lbl}>VAT number</label>
+                <input type="text" className={inp} value={profile.vat_number || ''} onChange={e => upd({ vat_number: e.target.value })} placeholder="GB123456789"/>
+              </div>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1.5">Employer&apos;s liability insurance expiry *</label>
-              <input type="date" value={profile.employers_liability_expiry} onChange={e => update('employers_liability_expiry', e.target.value)} className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"/>
-              <p className="text-xs text-gray-400 mt-1">Minimum £5m employer&apos;s liability cover required</p>
+              <label className={lbl}>Director / sole trader name</label>
+              <input type="text" className={inp} value={profile.director_name || ''} onChange={e => upd({ director_name: e.target.value })}/>
             </div>
-            <div className="border border-gray-200 rounded-xl p-4">
-              <div className="flex items-start gap-3">
-                <button
-                  type="button"
-                  onClick={() => update('umbrella_agreement_signed', !profile.umbrella_agreement_signed)}
-                  className={`w-5 h-5 rounded flex-shrink-0 border-2 flex items-center justify-center mt-0.5 transition-colors ${profile.umbrella_agreement_signed ? 'bg-emerald-700 border-emerald-700' : 'border-gray-300'}`}
-                >
-                  {profile.umbrella_agreement_signed && (
-                    <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-                      <path d="M1 4l3 3 5-6" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                  )}
-                </button>
+            <div>
+              <label className={lbl}>Registered address</label>
+              <input type="text" className={inp} value={profile.address_line1 || ''} onChange={e => upd({ address_line1: e.target.value })} placeholder="Address line 1"/>
+            </div>
+            <div>
+              <input type="text" className={inp} value={profile.address_line2 || ''} onChange={e => upd({ address_line2: e.target.value })} placeholder="Address line 2 (optional)"/>
+            </div>
+            <div className={grid2}>
+              <div>
+                <input type="text" className={inp} value={profile.city || ''} onChange={e => upd({ city: e.target.value })} placeholder="City"/>
+              </div>
+              <div>
+                <input type="text" className={inp} value={profile.postcode || ''} onChange={e => upd({ postcode: e.target.value })} placeholder="Postcode"/>
+              </div>
+            </div>
+            <div className={grid2}>
+              <div>
+                <label className={lbl}>Phone *</label>
+                <input type="tel" className={inp} value={profile.phone || ''} onChange={e => upd({ phone: e.target.value })}/>
+              </div>
+              <div>
+                <label className={lbl}>Business email *</label>
+                <input type="email" className={inp} value={profile.email || ''} onChange={e => upd({ email: e.target.value })}/>
+              </div>
+            </div>
+            <div>
+              <label className={lbl}>Website</label>
+              <input type="url" className={inp} value={profile.website || ''} onChange={e => upd({ website: e.target.value })} placeholder="https://"/>
+            </div>
+          </>}
+
+          {/* Accreditation */}
+          {tab === 'accreditation' && <>
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800">
+              Your MCS certificate number is required before you can submit BUS grant applications or generate MCS installation certificates.
+            </div>
+            <div className={grid2}>
+              <div>
+                <label className={lbl}>MCS certificate number *</label>
+                <input type="text" className={inp} value={profile.mcs_certificate_number || ''} onChange={e => upd({ mcs_certificate_number: e.target.value })} placeholder="MCSXXXXXXX"/>
+              </div>
+              <div>
+                <label className={lbl}>MCS expiry date</label>
+                <input type="date" className={inp} value={profile.mcs_expiry_date || ''} onChange={e => upd({ mcs_expiry_date: e.target.value })}/>
+              </div>
+            </div>
+            <div className={grid2}>
+              <div>
+                <label className={lbl}>TrustMark licence number</label>
+                <input type="text" className={inp} value={profile.trustmark_number || ''} onChange={e => upd({ trustmark_number: e.target.value })}/>
+              </div>
+              <div>
+                <label className={lbl}>Which? Trusted Trader number</label>
+                <input type="text" className={inp} value={profile.which_trusted_trader || ''} onChange={e => upd({ which_trusted_trader: e.target.value })}/>
+              </div>
+            </div>
+            <div>
+              <label className={lbl}>Additional qualifications (e.g. F-Gas, Part P, OFTEC)</label>
+              <textarea className={`${inp} h-24 resize-none`} value={profile.qualifications || ''} onChange={e => upd({ qualifications: e.target.value })} placeholder="List any additional qualifications, registration numbers and expiry dates"/>
+            </div>
+          </>}
+
+          {/* Insurance */}
+          {tab === 'insurance' && <>
+            <div className="space-y-4">
+              <div className="text-sm font-semibold text-gray-900">Public liability insurance</div>
+              <div className={grid2}>
                 <div>
-                  <div className="text-sm font-medium text-gray-900">Umbrella agreement *</div>
-                  <div className="text-xs text-gray-500 mt-0.5">I confirm I have read and agree to the Enerus Plus MCS Umbrella Scheme terms and conditions, and that all information provided is accurate and up to date.</div>
+                  <label className={lbl}>Insurer name</label>
+                  <input type="text" className={inp} value={profile.public_liability_insurer || ''} onChange={e => upd({ public_liability_insurer: e.target.value })}/>
+                </div>
+                <div>
+                  <label className={lbl}>Cover amount (£)</label>
+                  <input type="number" className={inp} value={profile.public_liability_amount || ''} onChange={e => upd({ public_liability_amount: e.target.value })} placeholder="2000000"/>
                 </div>
               </div>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-4 space-y-2">
-              <div className="text-xs font-medium text-gray-600 mb-3">Compliance checklist</div>
-              {[
-                { label: 'MCS number provided', done: !!profile.mcs_number },
-                { label: 'Competency selected', done: (profile.competencies?.length ?? 0) > 0 },
-                { label: 'Public liability insurance', done: !!profile.public_liability_expiry },
-                { label: "Employer's liability insurance", done: !!profile.employers_liability_expiry },
-                { label: 'Umbrella agreement signed', done: !!profile.umbrella_agreement_signed },
-              ].map(item => (
-                <div key={item.label} className="flex items-center gap-2.5">
-                  <div className={`w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${item.done ? 'bg-emerald-100' : 'bg-gray-200'}`}>
-                    {item.done && (
-                      <svg width="8" height="6" viewBox="0 0 8 6" fill="none">
-                        <path d="M1 3l2 2 4-4" stroke="#065f46" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                      </svg>
-                    )}
+              <div>
+                <label className={lbl}>Policy expiry date</label>
+                <input type="date" className={inp} value={profile.public_liability_expiry || ''} onChange={e => upd({ public_liability_expiry: e.target.value })}/>
+              </div>
+              <div className="border-t border-gray-100 pt-4">
+                <div className="text-sm font-semibold text-gray-900 mb-3">Professional indemnity insurance</div>
+                <div className={grid2}>
+                  <div>
+                    <label className={lbl}>Insurer name</label>
+                    <input type="text" className={inp} value={profile.indemnity_insurer || ''} onChange={e => upd({ indemnity_insurer: e.target.value })}/>
                   </div>
-                  <span className={`text-xs ${item.done ? 'text-gray-700' : 'text-gray-400'}`}>{item.label}</span>
+                  <div>
+                    <label className={lbl}>Policy expiry date</label>
+                    <input type="date" className={inp} value={profile.indemnity_expiry || ''} onChange={e => upd({ indemnity_expiry: e.target.value })}/>
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Documents */}
-        {activeTab === 'documents' && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6 space-y-4">
-            <p className="text-xs text-gray-500 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5">
-              Document uploads will be enabled in the next release. Accepted formats: PDF, JPG, PNG (max 10MB each).
-            </p>
-            {[
-              { label: 'Public liability insurance certificate', required: true },
-              { label: "Employer's liability insurance certificate", required: true },
-              { label: 'MCS qualifications & certificates', required: true },
-              { label: 'F-Gas handler certificate', required: false },
-              { label: 'Signed umbrella agreement', required: true },
-            ].map(doc => (
-              <div key={doc.label} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                <div>
-                  <div className="text-sm text-gray-900 font-medium">{doc.label}</div>
-                  <div className="text-xs text-gray-400 mt-0.5">{doc.required ? 'Required' : 'Optional'}</div>
-                </div>
-                <button disabled className="text-xs bg-gray-100 text-gray-400 px-4 py-2 rounded-lg cursor-not-allowed">Upload</button>
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          </>}
 
-        <div className="mt-6 flex justify-end">
-          <button onClick={handleSave} disabled={saving} className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-medium px-6 py-2.5 rounded-lg transition-colors">
-            {saving ? 'Saving...' : saved ? 'Saved ✓' : 'Save profile'}
-          </button>
+          {/* Branding */}
+          {tab === 'branding' && <>
+            <div className="space-y-4">
+              <div>
+                <label className={lbl}>Company logo</label>
+                <div className="flex items-start gap-4">
+                  <div className="w-32 h-32 rounded-xl border-2 border-dashed border-gray-300 flex items-center justify-center overflow-hidden bg-gray-50 cursor-pointer hover:border-emerald-400 transition-colors"
+                    onClick={() => logoRef.current?.click()}>
+                    {logoPreview
+                      ? <img src={logoPreview} alt="Logo" className="w-full h-full object-contain p-2"/>
+                      : <div className="text-center"><span className="text-3xl">🏢</span><div className="text-xs text-gray-400 mt-1">Click to upload</div></div>}
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-xs text-gray-500 mb-2">Appears on proposals, MCS certificates, and customer portal.</div>
+                    <div className="text-xs text-gray-400">PNG, JPG or SVG · Max 5MB · Transparent background recommended</div>
+                    <button onClick={() => logoRef.current?.click()} disabled={uploadingLogo}
+                      className="mt-3 text-xs bg-white border border-gray-200 rounded-lg px-4 py-2 hover:bg-gray-50 disabled:opacity-50">
+                      {uploadingLogo ? 'Uploading...' : 'Choose file'}
+                    </button>
+                    <input ref={logoRef} type="file" className="hidden" accept="image/*"
+                      onChange={e => { const f = e.target.files?.[0]; if (f) uploadLogo(f) }}/>
+                  </div>
+                </div>
+              </div>
+
+              <div className={grid2}>
+                <div>
+                  <label className={lbl}>Primary colour (proposals, headings)</label>
+                  <div className="flex gap-2">
+                    <input type="color" className="w-10 h-10 rounded-lg border border-gray-200 cursor-pointer" value={profile.primary_colour || '#059669'}
+                      onChange={e => upd({ primary_colour: e.target.value })}/>
+                    <input type="text" className={inp} value={profile.primary_colour || '#059669'}
+                      onChange={e => upd({ primary_colour: e.target.value })}/>
+                  </div>
+                </div>
+                <div>
+                  <label className={lbl}>Secondary colour (text, accents)</label>
+                  <div className="flex gap-2">
+                    <input type="color" className="w-10 h-10 rounded-lg border border-gray-200 cursor-pointer" value={profile.secondary_colour || '#1f2937'}
+                      onChange={e => upd({ secondary_colour: e.target.value })}/>
+                    <input type="text" className={inp} value={profile.secondary_colour || '#1f2937'}
+                      onChange={e => upd({ secondary_colour: e.target.value })}/>
+                  </div>
+                </div>
+              </div>
+
+              {/* Preview */}
+              <div>
+                <label className={lbl}>Proposal header preview</label>
+                <div className="border border-gray-200 rounded-xl overflow-hidden">
+                  <div className="p-4 flex items-center justify-between" style={{ borderBottom: `3px solid ${profile.primary_colour || '#059669'}` }}>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-gray-50 border border-gray-200 overflow-hidden">
+                        {logoPreview ? <img src={logoPreview} alt="" className="w-full h-full object-contain"/> : <span className="text-lg">🏢</span>}
+                      </div>
+                      <div>
+                        <div className="text-sm font-bold" style={{ color: profile.secondary_colour || '#1f2937' }}>{profile.company_name || 'Your Company Ltd'}</div>
+                        <div className="text-xs text-gray-400">MCS Accredited Installer</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm font-bold" style={{ color: profile.primary_colour || '#059669' }}>PROPOSAL REF-XXXXXX</div>
+                      <div className="text-xs text-gray-400">Prepared: {new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>}
+
+          {/* Banking */}
+          {tab === 'banking' && <>
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800">
+              Banking details are used for BUS grant payments. They are encrypted and only visible to Enerus Plus admin.
+            </div>
+            <div>
+              <label className={lbl}>Bank name</label>
+              <input type="text" className={inp} value={profile.bank_name || ''} onChange={e => upd({ bank_name: e.target.value })}/>
+            </div>
+            <div className={grid2}>
+              <div>
+                <label className={lbl}>Sort code</label>
+                <input type="text" className={inp} value={profile.bank_sort_code || ''} onChange={e => upd({ bank_sort_code: e.target.value })} placeholder="XX-XX-XX"/>
+              </div>
+              <div>
+                <label className={lbl}>Account number</label>
+                <input type="text" className={inp} value={profile.bank_account_number || ''} onChange={e => upd({ bank_account_number: e.target.value })} placeholder="XXXXXXXX"/>
+              </div>
+            </div>
+            <div className="border-t border-gray-100 pt-4">
+              <div className="text-sm font-semibold text-gray-900 mb-3">Subscription</div>
+              <div className="bg-gray-50 rounded-xl p-4 flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-bold text-gray-900 capitalize">{profile.subscription_plan || 'Solo'} plan</div>
+                  <div className="text-xs text-gray-400 mt-0.5">Status: <span className={`font-medium ${profile.subscription_status === 'active' ? 'text-emerald-600' : 'text-amber-600'}`}>{profile.subscription_status || 'Trial'}</span></div>
+                  {profile.trial_ends_at && <div className="text-xs text-gray-400">Trial ends: {new Date(profile.trial_ends_at).toLocaleDateString('en-GB')}</div>}
+                </div>
+                <button className="text-xs bg-emerald-700 text-white px-4 py-2 rounded-lg hover:bg-emerald-800">Manage subscription</button>
+              </div>
+            </div>
+          </>}
         </div>
       </div>
     </div>

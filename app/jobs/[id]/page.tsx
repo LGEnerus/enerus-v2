@@ -11,7 +11,7 @@ const STAGE_ORDER = [
   'bus_application', 'materials', 'installation', 'commissioning', 'handover'
 ]
 
-const STAGE_INFO: Record<string, { label: string; description: string; tasks: string[]; action?: string; actionLabel?: string }> = {
+const STAGE_INFO: Record<string, { label: string; description: string; tasks: string[]; action?: string; actionLabel?: string; links?: Array<{href:string;label:string;icon:string}> }> = {
   customer: {
     label: 'Customer',
     description: 'Customer registered and property details confirmed',
@@ -21,6 +21,7 @@ const STAGE_INFO: Record<string, { label: string; description: string; tasks: st
     label: 'Site survey',
     description: 'Site survey completed and documented',
     tasks: ['Site survey carried out', 'Heat loss survey completed', 'Survey report uploaded', 'Photos taken and uploaded'],
+    links: [{ href: 'documents', label: 'Upload survey photos', icon: '📷' }],
   },
   design: {
     label: 'System design',
@@ -28,41 +29,59 @@ const STAGE_INFO: Record<string, { label: string; description: string; tasks: st
     tasks: ['Room-by-room heat loss calculated (BS EN 12831-1:2017)', 'MCS 031 performance estimate completed', 'System specified and HP sized', 'MCS 020(a) noise check completed', 'Design signed off'],
     action: 'design',
     actionLabel: 'Open design tool →',
+    links: [
+      { href: 'noise', label: 'Noise assessment', icon: '🔊' },
+      { href: 'documents', label: 'Documents', icon: '📎' },
+    ],
   },
   proposal: {
     label: 'Proposal',
     description: 'Customer proposal and quotation issued',
     tasks: ['Quotation prepared', 'MCS 031 performance estimate included', 'Proposal document sent to customer', 'Customer questions addressed'],
+    links: [{ href: 'proposal-view', label: 'View proposal PDF', icon: '📄' }],
   },
   acceptance: {
     label: 'Customer acceptance',
     description: 'Customer has accepted the proposal',
-    tasks: ['Customer signed acceptance form', 'Signed copy received and filed', 'Cooling-off period noted'],
+    tasks: ['Customer acceptance link sent', 'Customer has reviewed proposal', 'Acceptance signed and recorded', 'Cooling-off period noted'],
+    action: 'bus',
+    actionLabel: 'Send acceptance link →',
+    links: [{ href: 'bus', label: 'BUS & acceptance tracker', icon: '🏷' }],
   },
   bus_application: {
     label: 'BUS application',
     description: 'Boiler Upgrade Scheme application submitted',
-    tasks: ['BUS application submitted to Ofgem', 'Ofgem application reference obtained', 'Grant approval confirmed'],
+    tasks: ['Eligibility confirmed', 'BUS application submitted to Ofgem', 'Ofgem reference obtained', 'Grant approval confirmed'],
+    action: 'bus',
+    actionLabel: 'Open BUS tracker →',
   },
   materials: {
     label: 'Materials',
     description: 'Equipment and materials ordered and delivered',
     tasks: ['Equipment ordered from supplier', 'Delivery date confirmed', 'Materials received and checked on site'],
+    links: [{ href: 'documents', label: 'Upload delivery notes', icon: '📦' }],
   },
   installation: {
     label: 'Installation',
     description: 'Heat pump system installed',
     tasks: ['Installation completed', 'Building regulations notification submitted', 'F-gas records completed (if applicable)', 'Commissioning checklist prepared'],
+    links: [{ href: 'documents', label: 'Upload install photos', icon: '📷' }],
   },
   commissioning: {
     label: 'Commissioning',
     description: 'System commissioned and tested',
-    tasks: ['System commissioned to MCS standard', 'MCS commissioning checklist completed', 'System pressure test carried out', 'Flow/return temperatures verified', 'Commissioning pack uploaded'],
+    tasks: ['System commissioned to MCS standard', 'MCS commissioning checklist completed', 'System pressure test within range', 'Flow/return temperatures verified', 'Customer demonstration completed'],
+    action: 'commissioning',
+    actionLabel: 'Open commissioning checklist →',
+    links: [{ href: 'documents', label: 'Upload commissioning docs', icon: '📋' }],
   },
   handover: {
     label: 'Handover',
     description: 'System handed over to customer',
-    tasks: ['Customer handover completed', 'User manual and controls training given', 'Warranty registered with manufacturer', 'MCS certificate issued', 'BUS grant redeemed (if applicable)'],
+    tasks: ['Customer handover completed', 'User manual and controls training given', 'Warranty registered with manufacturer', 'MCS certificate submitted', 'BUS grant redeemed (if applicable)'],
+    action: 'mcs-cert',
+    actionLabel: 'MCS certificate →',
+    links: [{ href: 'documents', label: 'Upload handover pack', icon: '📎' }],
   },
 }
 
@@ -350,6 +369,18 @@ export default function JobDetailPage() {
               {activeStage === 'design' && !systemDesign && getStageStatus(activeStage) === 'in_progress' && (
                 <div className="mb-3 bg-gray-50 border border-gray-200 rounded-xl p-4 text-xs text-gray-500">
                   No design started yet. Use the design tool to calculate heat loss and specify the system.
+                </div>
+              )}
+
+              {/* Stage quick links */}
+              {STAGE_INFO[activeStage]?.links && (
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {STAGE_INFO[activeStage].links!.map(link => (
+                    <a key={link.href} href={`/jobs/${jobId}/${link.href}`}
+                      className="text-xs flex items-center gap-1.5 border border-gray-200 text-gray-600 hover:border-emerald-400 hover:text-emerald-700 px-3 py-1.5 rounded-lg bg-white transition-colors">
+                      <span>{link.icon}</span>{link.label}
+                    </a>
+                  ))}
                 </div>
               )}
 
