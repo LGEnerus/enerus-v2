@@ -37,7 +37,7 @@ export type CanvasRoom = {
 
 export type CanvasTool =
   | 'select' | 'draw' | 'addWindow' | 'addDoor'
-  | 'addRadiator' | 'addUFH' | 'pan' | 'drawInsul'
+  | 'addRadiator' | 'addUFH' | 'drawInsul'
 
 export type Viewport = { x: number; y: number; zoom: number }
 
@@ -347,7 +347,8 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
     const worldPt = getWorldPt(e)
     const fr = rooms.filter(r => r.floor === activeFloor)
 
-    if (tool === 'pan' || e.buttons === 4) {
+    // Middle mouse button always pans
+    if (e.buttons === 4) {
       dragRef.current = { type: 'pan', startPx: pxPt, startVp: { ...vp } }
       return
     }
@@ -410,29 +411,26 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
       return
     }
 
-    // ── Select ────────────────────────────────────────────────────────────────
-    if (tool === 'select') {
+    // ── Select / interact (works in any non-draw tool) ───────────────────────
+    if (!['draw','drawInsul','addWindow','addDoor','addRadiator','addUFH'].includes(tool)) {
       const selRoom = fr.find(r => r.id === selectedId)
 
-      // Check elements first
-      for (let i = fr.length-1; i >= 0; i--) {
-        const elId = hitElement(pxPt, fr[i])
+      // Check elements first (on selected room)
+      if (selRoom) {
+        const elId = hitElement(pxPt, selRoom)
         if (elId) {
-          onSelect(fr[i].id, 'element', elId)
-          dragRef.current = { type: 'element', id: fr[i].id, elemId: elId, startPx: pxPt,
-            startElemPos: fr[i].elements.find(el => el.id === elId)?.position }
+          onSelect(selRoom.id, 'element', elId)
+          dragRef.current = { type: 'element', id: selRoom.id, elemId: elId, startPx: pxPt,
+            startElemPos: selRoom.elements.find(el => el.id === elId)?.position }
           return
         }
-      }
-
-      // Check vertices of selected room
-      if (selRoom) {
+        // Check vertices
         const vi = hitVertex(pxPt, selRoom)
         if (vi >= 0) {
           dragRef.current = { type: 'vertex', id: selRoom.id, vertIdx: vi, startPx: pxPt, startVerts: [...selRoom.vertices] }
           return
         }
-        // Check wall segments (for pushing/pulling)
+        // Check wall segments
         const wi = hitWall(pxPt, selRoom)
         if (wi >= 0) {
           dragRef.current = {
@@ -444,7 +442,18 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         }
       }
 
-      // Check room bodies
+      // Check elements on any room
+      for (let i = fr.length-1; i >= 0; i--) {
+        const elId = hitElement(pxPt, fr[i])
+        if (elId) {
+          onSelect(fr[i].id, 'element', elId)
+          dragRef.current = { type: 'element', id: fr[i].id, elemId: elId, startPx: pxPt,
+            startElemPos: fr[i].elements.find(el => el.id === elId)?.position }
+          return
+        }
+      }
+
+      // Check room bodies — always draggable
       for (let i = fr.length-1; i >= 0; i--) {
         if (ptInPoly(worldPt, fr[i].vertices)) {
           onSelect(fr[i].id)
@@ -453,7 +462,9 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         }
       }
 
+      // Nothing hit — pan the canvas
       onSelect(null)
+      dragRef.current = { type: 'pan', startPx: pxPt, startVp: { ...vp } }
     }
   }
 
@@ -610,12 +621,24 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
     const pxPt = getPxPt(e)
     const fr = rooms.filter(r => r.floor === activeFloor)
     for (let i = fr.length-1; i >= 0; i--) {
+      // Right-click element → delete
       const elId = hitElement(pxPt, fr[i])
       if (elId) {
         onRoomsChange(rooms.map(r => r.id !== fr[i].id ? r : { ...r, elements: r.elements.filter(el => el.id !== elId) }))
         if (selectedElementId === elId) onSelect(fr[i].id)
         return
       }
+      // Right-click vertex (wall intersection) → delete vertex if room has >4 verts
+      const room = fr[i]
+      const vi = hitVertex(pxPt, room)
+      if (vi >= 0 && room.vertices.length > 4) {
+        // Delete this vertex — merges the two adjacent wall segments
+        const newVerts = room.vertices.filter((_: any, idx: number) => idx !== vi)
+        const newWT = room.wallTypes.filter((_: any, idx: number) => idx !== vi)
+        commit(rooms.map(r => r.id !== room.id ? r : { ...r, vertices: newVerts, wallTypes: newWT }))
+        return
+      }
+      // Right-click wall → wall type context menu
       const wi = hitWall(pxPt, fr[i])
       if (wi >= 0) {
         setCtxMenu({ px: pxPt, roomId: fr[i].id, wallIdx: wi })
@@ -956,8 +979,8 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         <text x={10} y={16} fontSize={10} fill="#9ca3af">
           {tool==='draw' && 'Click and drag to draw a room'}
           {tool==='drawInsul' && `Click and drag to draw ${drawingInsulType} insulation region`}
-          {tool!=='draw' && !['addWindow','addDoor','addRadiator','addUFH'].includes(tool) && !selectedId && 'Click a room to select · Drag to move'}
-          {tool!=='draw' && !['addWindow','addDoor','addRadiator','addUFH'].includes(tool) && selectedId && 'Drag corner to resize · Drag wall to push/pull · Dbl-click wall edge to add vertex · Right-click wall for type'}
+          {!selectedId && !['draw','drawInsul','addWindow','addDoor','addRadiator','addUFH'].includes(tool) && 'Click a room to select · Drag to move · Drag empty space to pan'}
+          {selectedId && !['draw','drawInsul','addWindow','addDoor','addRadiator','addUFH'].includes(tool) && 'Drag to move · Drag corner to resize · Drag wall to push/pull · Dbl-click edge to add vertex · Right-click vertex to delete · Right-click wall for type'}
           {(tool==='addWindow'||tool==='addDoor'||tool==='addRadiator'||tool==='addUFH') && `Click on a wall to place · Right-click element to delete`}
         </text>
       </svg>
@@ -1580,7 +1603,7 @@ export default function DesignPage() {
                           <>
                             <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
                             <div className="flex items-center gap-2 h-8 justify-end">
-                              <span className="text-xs text-amber-600 font-medium">Floors & Ceilings</span>
+                              <span className="text-xs text-amber-600 font-medium">Floor / Ceiling insulation</span>
                               <div className="w-2 h-2 rounded-full border-2 border-amber-400 bg-white"/>
                             </div>
                             <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
@@ -1614,11 +1637,11 @@ export default function DesignPage() {
                     )
                   })}
 
-                  {/* Connector to ground */}
+                  {/* Connector to floor construction note */}
                   <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
                   <div className="flex items-center gap-2 h-8 justify-end">
-                    <span className="text-xs text-gray-400 font-medium">Floors</span>
-                    <div className="w-2 h-2 rounded-full border-2 border-gray-300 bg-white"/>
+                    <span className="text-xs text-gray-400 italic">floor construction</span>
+                    <div className="w-2 h-2 rounded-full border border-gray-300 bg-gray-100"/>
                   </div>
                   <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
                   <div className="flex items-center gap-2 h-12 justify-end">
@@ -1663,11 +1686,25 @@ export default function DesignPage() {
 
                     return (
                       <div key={f} className="flex flex-col items-center">
-                        {/* Insulation block between floors */}
+                        {/* Insulation block between floors — click to draw */}
                         {hasCeiling && fi > 0 && (
-                          <div style={{ height: 32, display: 'flex', alignItems: 'center' }}>
-                            <IsometricBlock active={false} dashed={false} color="amber" label="insul" width={120} height={20}/>
-                          </div>
+                          <button style={{ height: 32, display: 'flex', alignItems: 'center' }}
+                            onClick={() => { setDrawingInsulFloor(f); setDrawingInsulType('floor'); setTool('drawInsul'); setShowLayerFAB(false) }}
+                            title="Click to draw insulation region on canvas">
+                            <IsometricBlock active={false} dashed={false} color="amber" label="Floor/Ceiling ins." width={120} height={20}/>
+                          </button>
+                        )}
+                        {/* If between floors but no insulation layer yet — show add option */}
+                        {!hasCeiling && fi > 0 && (
+                          <button style={{ height: 32, display: 'flex', alignItems: 'center' }}
+                            onClick={() => {
+                              const maxFloor2 = f
+                              const belowFloor = arr[fi - 1]
+                              setInsulLayers(prev => [...prev, { id: `ins_${Date.now()}`, betweenFloors: [belowFloor, maxFloor2] as [number,number], label: 'insulation', uValue: 0.25 }])
+                            }}
+                            title="Add floor/ceiling insulation layer">
+                            <IsometricBlock active={false} dashed={true} color="amber" label="+ add insulation" width={120} height={20}/>
+                          </button>
                         )}
                         {/* Floor block */}
                         <button onClick={() => { setActiveFloor(f); setShowLayerFAB(false) }}
@@ -1684,9 +1721,9 @@ export default function DesignPage() {
                     )
                   })}
 
-                  {/* Ground/foundation block */}
-                  <div style={{ height: 48, display: 'flex', alignItems: 'center' }}>
-                    <IsometricBlock active={false} dashed={false} color="stone" label="foundation" width={120} height={28}/>
+                  {/* Ground floor construction note — not a separate layer */}
+                  <div style={{ height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span className="text-xs text-gray-400 italic px-2 text-center">floor construction<br/>set per room</span>
                   </div>
                 </div>
               </div>
