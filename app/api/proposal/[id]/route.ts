@@ -28,20 +28,29 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   const jobId = params.id
 
   try {
-    // Load all job data
+    // Load all job data — separate queries to avoid RLS join issues
     const [jobRes, designRes] = await Promise.all([
-      supabase.from('jobs').select('*, customers(*)').eq('id', jobId).single(),
+      supabase.from('jobs').select('*').eq('id', jobId).single(),
       supabase.from('system_designs').select('*').eq('job_id', jobId).single(),
     ])
 
     const job = (jobRes.data as any)
     const design = (designRes.data as any)
-    const customer = job?.customers
-    const di = design?.design_inputs || {}
 
-    if (!job || !customer) {
+    if (!job) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
+
+    // Load customer separately
+    const { data: customerData } = await supabase
+      .from('customers')
+      .select('*')
+      .eq('id', job.customer_id)
+      .single()
+
+    const customer = customerData
+    const di = design?.design_inputs || {}
+
 
     // Extract design data
     const rooms: any[] = di.rooms || []
