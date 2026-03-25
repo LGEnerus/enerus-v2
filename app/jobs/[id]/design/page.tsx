@@ -199,16 +199,19 @@ type Props = {
   onToolChange: (tool: CanvasTool) => void
   drawingInsulFloor: number | null
   drawingInsulType: 'floor' | 'ceiling'
-  insulRegions: Array<{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling'}>
-  onInsulRegionAdd: (r:{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling'}) => void
+  insulRegions: Array<{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling';construction:string;insulationMm:number;label:string}>
+  onInsulRegionAdd: (r:{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling';construction:string;insulationMm:number;label:string}) => void
   insulLayerDefaultU: (f:number) => number
+  activeLayerMode: 'rooms' | 'floor' | 'ceiling'
+  selectedRegionId: string | null
+  onRegionSelect: (id: string | null) => void
   selectedId: string | null
   selectedElementId: string | null
 }
 
 const DesignCanvas = forwardRef<CanvasRef, Props>(({
   rooms, activeFloor, tool, gridMm, showGrid, showDims, showHeatLoss,
-  bgImage, onRoomsChange, onSelect, onToolChange, drawingInsulFloor, drawingInsulType, insulRegions, onInsulRegionAdd, insulLayerDefaultU, selectedId, selectedElementId,
+  bgImage, onRoomsChange, onSelect, onToolChange, drawingInsulFloor, drawingInsulType, insulRegions, onInsulRegionAdd, insulLayerDefaultU, activeLayerMode, selectedRegionId, onRegionSelect, selectedId, selectedElementId,
 }, ref) => {
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -462,8 +465,9 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         }
       }
 
-      // Nothing hit — pan the canvas
+      // Nothing hit — deselect region and pan
       onSelect(null)
+      onRegionSelect(null)
       dragRef.current = { type: 'pan', startPx: pxPt, startVp: { ...vp } }
     }
   }
@@ -582,6 +586,9 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           vertices: [{ x:x1,y:y1 }, { x:x2,y:y1 }, { x:x2,y:y2 }, { x:x1,y:y2 }],
           uValue: insulLayerDefaultU(drawingInsulFloor!),
           type: drawingInsulType,
+          construction: drawingInsulType === 'floor' ? 'ground_unins' : 'pitched_100',
+          insulationMm: 100,
+          label: drawingInsulType === 'floor' ? 'Floor construction' : 'Ceiling insulation',
         })
         onToolChange('select')
       }
@@ -907,20 +914,36 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
         {/* Ghost — floor below */}
         {ghostRooms.map(r => renderRoom(r, true))}
 
-        {/* Insulation regions */}
+        {/* Insulation regions — clickable, selectable */}
         {insulRegions.filter(ir => ir.floor === activeFloor).map(ir => {
           const pts = ir.vertices.map(v => toScreen(v, vp))
           const ptsStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
           const c = polyCentroid(pts)
           const col = ir.type === 'ceiling' ? '#3b82f6' : '#f59e0b'
-          const label = ir.type === 'ceiling' ? 'Ceiling ins' : 'Floor ins'
+          const isSelReg = selectedRegionId === ir.id
+          const label = ir.label || (ir.type === 'ceiling' ? 'Ceiling' : 'Floor')
           return (
-            <g key={ir.id}>
-              <polygon points={ptsStr} fill={col} fillOpacity={0.12}
-                stroke={col} strokeWidth={2} strokeDasharray="8,4"/>
-              <text x={c.x} y={c.y} textAnchor="middle" dominantBaseline="middle"
+            <g key={ir.id} style={{ cursor: 'pointer' }}
+              onClick={e => { e.stopPropagation(); onRegionSelect(isSelReg ? null : ir.id) }}
+              onContextMenu={e => { e.preventDefault(); e.stopPropagation()
+                // Right-click region to delete
+                // We can't call setInsulRegions directly in canvas, so use a workaround
+                // by selecting and letting the right panel handle delete
+                onRegionSelect(ir.id)
+              }}>
+              <polygon points={ptsStr} fill={col} fillOpacity={isSelReg ? 0.22 : 0.12}
+                stroke={col} strokeWidth={isSelReg ? 3 : 2} strokeDasharray="8,4"/>
+              {/* Selection handles on corners */}
+              {isSelReg && pts.map((p, i) => (
+                <circle key={i} cx={p.x} cy={p.y} r={6} fill="white" stroke={col} strokeWidth={2}/>
+              ))}
+              <text x={c.x} y={c.y - (isSelReg ? 8 : 0)} textAnchor="middle" dominantBaseline="middle"
                 fontSize={10} fill={col} fontWeight="600" style={{ pointerEvents:'none', userSelect:'none' }}>
-                {label} U{ir.uValue}
+                {label}
+              </text>
+              <text x={c.x} y={c.y + (isSelReg ? 8 : 10)} textAnchor="middle" dominantBaseline="middle"
+                fontSize={9} fill={col} opacity={0.8} style={{ pointerEvents:'none', userSelect:'none' }}>
+                U{ir.uValue} W/m²K
               </text>
             </g>
           )
@@ -943,9 +966,36 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
           )
         })()}
 
-        {/* Active floor rooms — non-selected first, selected on top */}
-        {floorRooms.filter(r => r.id !== selectedId).map(r => renderRoom(r))}
-        {floorRooms.filter(r => r.id === selectedId).map(r => renderRoom(r))}
+        {/* Active floor rooms:
+            - In rooms mode: render normally (interactive)
+            - In floor/ceiling layer mode: render as ghosts (non-interactive outlines) */}
+        {activeLayerMode === 'rooms'
+          ? <>
+              {floorRooms.filter(r => r.id !== selectedId).map(r => renderRoom(r))}
+              {floorRooms.filter(r => r.id === selectedId).map(r => renderRoom(r))}
+            </>
+          : <>
+              {floorRooms.map(r => (
+                <g key={`layerghst_${r.id}`} opacity={0.4}>
+                  <polygon
+                    points={r.vertices.map(v => { const s = toScreen(v, vp); return `${s.x.toFixed(1)},${s.y.toFixed(1)}` }).join(' ')}
+                    fill="#f0f9ff" stroke="#60a5fa" strokeWidth={2} strokeDasharray="5,3"/>
+                  {(() => {
+                    const pts = r.vertices.map(v => toScreen(v, vp))
+                    const c = polyCentroid(pts)
+                    const lSz = Math.max(7, Math.min(11, mmToPx(1400, vp.zoom)))
+                    return lSz > 6 ? (
+                      <text x={c.x} y={c.y} textAnchor="middle" dominantBaseline="middle"
+                        fontSize={lSz} fill="#3b82f6" fontWeight="500"
+                        style={{ pointerEvents:'none', userSelect:'none' }}>
+                        {r.name || r.roomType}
+                      </text>
+                    ) : null
+                  })()}
+                </g>
+              ))}
+            </>
+        }
 
         {/* Draw preview */}
         {tool === 'draw' && drawStart && drawCurrent && (() => {
@@ -1257,9 +1307,14 @@ export default function DesignPage() {
   const [floorNames, setFloorNames] = useState<Record<number,string>>({ 0: 'Ground floor' })
   const [editingFloorName, setEditingFloorName] = useState<number | null>(null)
   const [insulLayers, setInsulLayers] = useState<Array<{id:string;betweenFloors:[number,number];label:string;uValue:number}>>([])
-  const [insulRegions, setInsulRegions] = useState<Array<{id:string;floor:number;vertices:{x:number;y:number}[];uValue:number;type:'floor'|'ceiling'}>>([])
+  const [insulRegions, setInsulRegions] = useState<Array<{
+    id: string; floor: number; vertices: {x:number;y:number}[]; uValue: number
+    type: 'floor' | 'ceiling'; construction: string; insulationMm: number; label: string
+  }>>([])
   const [drawingInsulFloor, setDrawingInsulFloor] = useState<number | null>(null)
   const [drawingInsulType, setDrawingInsulType] = useState<'floor'|'ceiling'>('floor')
+  const [activeLayerMode, setActiveLayerMode] = useState<'rooms' | 'floor' | 'ceiling'>('rooms')
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null)
   const [showRoomPicker, setShowRoomPicker] = useState(false)
   const [customer, setCustomer] = useState<any>(null)
   const [existingDesign, setExistingDesign] = useState<any>(null)
@@ -1511,7 +1566,26 @@ export default function DesignPage() {
 
         {/* ── Left tool palette ────────────────────────────────────────────── */}
         <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-3 gap-1.5 flex-shrink-0">
-          {TOOLS.map(t => (
+          {/* In floor/ceiling layer mode, only show draw tool + exit button */}
+          {activeLayerMode !== 'rooms' && (
+            <div className="w-full flex flex-col items-center gap-1.5 pb-2 border-b border-gray-100">
+              <div className="text-xs text-center font-medium text-amber-700 leading-tight px-1" style={{ fontSize: '8px' }}>
+                {activeLayerMode === 'floor' ? 'FLOOR' : 'CEILING'}<br/>MODE
+              </div>
+              <button onClick={() => setTool('drawInsul')} title="Draw region"
+                className={`w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors ${tool === 'drawInsul' ? 'bg-amber-600 text-white shadow-md' : 'bg-white text-amber-600 hover:bg-amber-50 border border-amber-200'}`}>
+                <span className="text-2xl leading-none">⬛</span>
+                <span className="font-medium" style={{ fontSize: '8px' }}>Draw</span>
+              </button>
+              <button onClick={() => { setActiveLayerMode('rooms'); setTool('select'); setSelectedRegionId(null) }} title="Back to rooms"
+                className="w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-1 bg-white text-gray-500 hover:bg-gray-50 border border-gray-200 transition-colors">
+                <span className="text-xl leading-none">↩</span>
+                <span className="font-medium" style={{ fontSize: '8px' }}>Rooms</span>
+              </button>
+            </div>
+          )}
+
+          {activeLayerMode === 'rooms' && TOOLS.map(t => (
             <button key={t.id} onClick={() => setTool(t.id)} title={t.label}
               className={`w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors ${tool === t.id ? 'bg-emerald-700 text-white shadow-md' : `bg-white ${t.color || 'text-gray-600'} hover:bg-gray-50 border border-gray-200`}`}>
               <span className="text-2xl leading-none">{t.icon}</span>
@@ -1571,6 +1645,9 @@ export default function DesignPage() {
             insulRegions={insulRegions}
             onInsulRegionAdd={r => setInsulRegions(prev => [...prev, r])}
             insulLayerDefaultU={f => insulLayers.find(il => il.betweenFloors[1] === f || il.betweenFloors[0] === f)?.uValue || 0.25}
+            activeLayerMode={activeLayerMode}
+            selectedRegionId={selectedRegionId}
+            onRegionSelect={setSelectedRegionId}
             selectedId={selectedId}
             selectedElementId={selectedElementId}
           />
@@ -1589,16 +1666,16 @@ export default function DesignPage() {
                     <span className="text-xs text-gray-400 font-medium">Add Level</span>
                     <div className="w-2 h-2 rounded-full border-2 border-gray-400 bg-white"/>
                   </div>
-                  {/* Connector line segment */}
                   <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
 
                   {/* Dynamic floors — top to bottom */}
                   {[...floors].reverse().map((f, fi, arr) => {
                     const isActive = f === activeFloor
                     const hasCeiling = insulLayers.some(il => il.betweenFloors[1] === f)
+                    const floorRoomCount = rooms.filter(r => r.floor === f).length
                     return (
-                      <div key={f} className="flex flex-col items-end">
-                        {/* Floor/ceiling insulation label (between floors) */}
+                      <div key={`lbl_${f}`} className="flex flex-col items-end">
+                        {/* Between-floor insulation label */}
                         {hasCeiling && fi > 0 && (
                           <>
                             <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
@@ -1609,62 +1686,54 @@ export default function DesignPage() {
                             <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
                           </>
                         )}
-                        {/* Floor label */}
-                        <div className="flex items-center gap-2 h-14 justify-end">
-                          <div className="flex items-center gap-1.5">
-                            {isActive && (
-                              <button onClick={e => { e.stopPropagation(); setEditingFloorName(f) }}
-                                className="text-gray-300 hover:text-gray-500 text-xs">✏</button>
-                            )}
-                            {editingFloorName === f ? (
-                              <input type="text" autoFocus value={getFloorName(f)}
-                                className="text-xs font-bold text-emerald-700 border border-emerald-400 rounded px-1 py-0.5 w-24 text-right"
-                                onChange={e => setFloorNames(prev => ({ ...prev, [f]: e.target.value }))}
-                                onBlur={() => setEditingFloorName(null)}
-                                onKeyDown={e => { if (e.key === 'Enter') setEditingFloorName(null) }}
-                                onClick={e => e.stopPropagation()}/>
-                            ) : (
-                              <span className={`text-xs font-bold ${isActive ? 'text-emerald-700' : 'text-gray-500'}`}>
-                                {getFloorName(f)}
-                              </span>
-                            )}
+                        {/* Ceiling sub-layer label */}
+                        {floorRoomCount > 0 && (
+                          <div className="flex items-center gap-2 h-9 justify-end">
+                            <span className={`text-xs ${isActive && activeLayerMode === 'ceiling' ? 'text-blue-600 font-bold' : 'text-gray-400'}`}>Ceiling</span>
+                            <div className={`w-2 h-2 rounded-full border-2 ${isActive && activeLayerMode === 'ceiling' ? 'border-blue-500 bg-blue-500' : 'border-gray-300 bg-white'}`}/>
                           </div>
-                          <div className={`w-2.5 h-2.5 rounded-full border-2 ${isActive ? 'border-emerald-500 bg-emerald-500' : 'border-gray-400 bg-white'}`}/>
+                        )}
+                        {/* Floor name label */}
+                        <div className="flex items-center gap-2 h-14 justify-end">
+                          {isActive && (
+                            <button onClick={e => { e.stopPropagation(); setEditingFloorName(f) }}
+                              className="text-gray-300 hover:text-gray-500 text-xs">✏</button>
+                          )}
+                          {editingFloorName === f ? (
+                            <input type="text" autoFocus value={getFloorName(f)}
+                              className="text-xs font-bold text-emerald-700 border border-emerald-400 rounded px-1 py-0.5 w-24 text-right"
+                              onChange={e => setFloorNames(prev => ({ ...prev, [f]: e.target.value }))}
+                              onBlur={() => setEditingFloorName(null)}
+                              onKeyDown={e => { if (e.key === 'Enter') setEditingFloorName(null) }}
+                              onClick={e => e.stopPropagation()}/>
+                          ) : (
+                            <span className={`text-xs font-bold ${isActive && activeLayerMode === 'rooms' ? 'text-emerald-700' : 'text-gray-500'}`}>
+                              {getFloorName(f)}
+                            </span>
+                          )}
+                          <div className={`w-2.5 h-2.5 rounded-full border-2 ${isActive && activeLayerMode === 'rooms' ? 'border-emerald-500 bg-emerald-500' : 'border-gray-400 bg-white'}`}/>
                         </div>
-                        {/* Line below */}
+                        {/* Floor sub-layer label */}
+                        {floorRoomCount > 0 && (
+                          <div className="flex items-center gap-2 h-9 justify-end">
+                            <span className={`text-xs ${isActive && activeLayerMode === 'floor' ? 'text-amber-600 font-bold' : 'text-gray-400'}`}>Floor</span>
+                            <div className={`w-2 h-2 rounded-full border-2 ${isActive && activeLayerMode === 'floor' ? 'border-amber-500 bg-amber-500' : 'border-gray-300 bg-white'}`}/>
+                          </div>
+                        )}
                         {fi < arr.length - 1 && <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>}
                       </div>
                     )
                   })}
 
-                  {/* Connector to floor construction note */}
-                  <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
-                  <div className="flex items-center gap-2 h-8 justify-end">
-                    <span className="text-xs text-gray-400 italic">floor construction</span>
-                    <div className="w-2 h-2 rounded-full border border-gray-300 bg-gray-100"/>
-                  </div>
+                  {/* Connector + collapse */}
                   <div className="w-px bg-gray-300 self-end mr-[3px]" style={{ height: 4 }}/>
                   <div className="flex items-center gap-2 h-12 justify-end">
                     <button onClick={() => setShowLayerFAB(false)}
                       className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600">
                       Collapse
                       <div className="w-5 h-5 rounded-full border border-gray-300 bg-white flex items-center justify-center">
-                        <svg width="8" height="6" viewBox="0 0 8 6"><path d="M1 1l3 3 3-3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
-                        </svg>
+                        <svg width="8" height="6" viewBox="0 0 8 6"><path d="M1 1l3 3 3-3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round"/></svg>
                       </div>
-                    </button>
-                  </div>
-                  {/* Draw insulation actions */}
-                  <div className="flex flex-col gap-1 mt-1">
-                    <button onClick={() => { setDrawingInsulFloor(activeFloor); setDrawingInsulType('floor'); setTool('drawInsul'); setShowLayerFAB(false) }}
-                      className="flex items-center gap-1.5 text-xs text-amber-600 hover:text-amber-800 justify-end">
-                      <span>Draw floor insulation</span>
-                      <div className="w-4 h-4 rounded bg-amber-100 border border-amber-300 flex items-center justify-center text-xs">⬇</div>
-                    </button>
-                    <button onClick={() => { setDrawingInsulFloor(activeFloor); setDrawingInsulType('ceiling'); setTool('drawInsul'); setShowLayerFAB(false) }}
-                      className="flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 justify-end">
-                      <span>Draw ceiling insulation</span>
-                      <div className="w-4 h-4 rounded bg-blue-100 border border-blue-300 flex items-center justify-center text-xs">⬆</div>
                     </button>
                   </div>
                 </div>
@@ -1672,59 +1741,71 @@ export default function DesignPage() {
                 {/* Right column: isometric layer blocks */}
                 <div className="flex flex-col items-center" style={{ gap: 0 }}>
                   {/* Add Level block — dashed */}
-                  <button onClick={() => { addFloor(); }}
-                    className="group" style={{ height: 56, display: 'flex', alignItems: 'center' }}>
-                    <IsometricBlock active={false} dashed={true} color="gray" label="" width={120} height={40}/>
+                  <button onClick={() => { addFloor() }}
+                    style={{ height: 56, display: 'flex', alignItems: 'center' }}>
+                    <IsometricBlock active={false} dashed={true} color="gray" label="+ add floor" width={120} height={40}/>
                   </button>
 
                   {/* Floor stack */}
                   {[...floors].reverse().map((f, fi, arr) => {
                     const isActive = f === activeFloor
                     const fRooms = rooms.filter(r => r.floor === f)
-                    const fTotal = fRooms.reduce((s,r) => s+(r.heatLossW||0), 0)
+                    const fTotal = fRooms.reduce((s: number, r: any) => s + (r.heatLossW || 0), 0)
                     const hasCeiling = insulLayers.some(il => il.betweenFloors[1] === f)
-
                     return (
-                      <div key={f} className="flex flex-col items-center">
-                        {/* Insulation block between floors — click to draw */}
-                        {hasCeiling && fi > 0 && (
+                      <div key={`blk_${f}`} className="flex flex-col items-center">
+                        {/* Between-floor insulation block */}
+                        {fi > 0 && (hasCeiling ? (
                           <button style={{ height: 32, display: 'flex', alignItems: 'center' }}
-                            onClick={() => { setDrawingInsulFloor(f); setDrawingInsulType('floor'); setTool('drawInsul'); setShowLayerFAB(false) }}
-                            title="Click to draw insulation region on canvas">
+                            onClick={() => { setDrawingInsulFloor(f); setDrawingInsulType('floor'); setTool('drawInsul'); setShowLayerFAB(false) }}>
                             <IsometricBlock active={false} dashed={false} color="amber" label="Floor/Ceiling ins." width={120} height={20}/>
                           </button>
-                        )}
-                        {/* If between floors but no insulation layer yet — show add option */}
-                        {!hasCeiling && fi > 0 && (
+                        ) : (
                           <button style={{ height: 32, display: 'flex', alignItems: 'center' }}
                             onClick={() => {
-                              const maxFloor2 = f
                               const belowFloor = arr[fi - 1]
-                              setInsulLayers(prev => [...prev, { id: `ins_${Date.now()}`, betweenFloors: [belowFloor, maxFloor2] as [number,number], label: 'insulation', uValue: 0.25 }])
-                            }}
-                            title="Add floor/ceiling insulation layer">
+                              setInsulLayers(prev => [...prev, { id: `ins_${Date.now()}`, betweenFloors: [belowFloor, f] as [number,number], label: 'insulation', uValue: 0.25 }])
+                            }}>
                             <IsometricBlock active={false} dashed={true} color="amber" label="+ add insulation" width={120} height={20}/>
                           </button>
+                        ))}
+                        {/* Ceiling sub-block */}
+                        {fRooms.length > 0 && (
+                          <button style={{ height: 36, display: 'flex', alignItems: 'center' }}
+                            onClick={() => { setActiveFloor(f); setActiveLayerMode('ceiling'); setDrawingInsulFloor(f); setDrawingInsulType('ceiling'); setTool('drawInsul'); setShowLayerFAB(false); setSelectedRegionId(null) }}>
+                            <IsometricBlock
+                              active={isActive && activeLayerMode === 'ceiling'}
+                              dashed={insulRegions.filter(ir => ir.floor === f && ir.type === 'ceiling').length === 0}
+                              color={isActive && activeLayerMode === 'ceiling' ? 'amber' : 'gray'}
+                              label={insulRegions.filter(ir => ir.floor === f && ir.type === 'ceiling').length > 0 ? `${insulRegions.filter(ir => ir.floor === f && ir.type === 'ceiling').length} region(s)` : '+ draw ceiling'}
+                              width={120} height={22}/>
+                          </button>
                         )}
-                        {/* Floor block */}
-                        <button onClick={() => { setActiveFloor(f); setShowLayerFAB(false) }}
-                          style={{ height: 56, display: 'flex', alignItems: 'center' }}>
+                        {/* Rooms block */}
+                        <button style={{ height: 56, display: 'flex', alignItems: 'center' }}
+                          onClick={() => { setActiveFloor(f); setActiveLayerMode('rooms'); setTool('select'); setShowLayerFAB(false) }}>
                           <IsometricBlock
-                            active={isActive}
+                            active={isActive && activeLayerMode === 'rooms'}
                             dashed={false}
-                            color={isActive ? 'emerald' : 'white'}
+                            color={isActive && activeLayerMode === 'rooms' ? 'emerald' : 'white'}
                             label={fRooms.length > 0 ? `${fRooms.length}r · ${(fTotal/1000).toFixed(1)}kW` : 'empty'}
-                            width={120}
-                            height={40}/>
+                            width={120} height={40}/>
                         </button>
+                        {/* Floor sub-block */}
+                        {fRooms.length > 0 && (
+                          <button style={{ height: 36, display: 'flex', alignItems: 'center' }}
+                            onClick={() => { setActiveFloor(f); setActiveLayerMode('floor'); setDrawingInsulFloor(f); setDrawingInsulType('floor'); setTool('drawInsul'); setShowLayerFAB(false); setSelectedRegionId(null) }}>
+                            <IsometricBlock
+                              active={isActive && activeLayerMode === 'floor'}
+                              dashed={insulRegions.filter(ir => ir.floor === f && ir.type === 'floor').length === 0}
+                              color={isActive && activeLayerMode === 'floor' ? 'amber' : 'stone'}
+                              label={insulRegions.filter(ir => ir.floor === f && ir.type === 'floor').length > 0 ? `${insulRegions.filter(ir => ir.floor === f && ir.type === 'floor').length} region(s)` : '+ draw floor'}
+                              width={120} height={22}/>
+                          </button>
+                        )}
                       </div>
                     )
                   })}
-
-                  {/* Ground floor construction note — not a separate layer */}
-                  <div style={{ height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <span className="text-xs text-gray-400 italic px-2 text-center">floor construction<br/>set per room</span>
-                  </div>
                 </div>
               </div>
             )}
@@ -1746,7 +1827,6 @@ export default function DesignPage() {
             </button>
           </div>
 
-
           {/* ── Add room hint (draw tool selected, no rooms on floor) ──────── */}
           {tool === 'draw' && rooms.filter(r=>r.floor===activeFloor).length === 0 && (
             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none text-center">
@@ -1760,7 +1840,89 @@ export default function DesignPage() {
         </div>
 
         {/* ── Right property panel ──────────────────────────────────────────── */}
-        {(selectedRoom || selectedElem) && (
+        {/* Region properties panel — shown when a floor/ceiling region is selected */}
+        {selectedRegionId && activeLayerMode !== 'rooms' && (() => {
+          const reg = insulRegions.find(r => r.id === selectedRegionId)
+          if (!reg) return null
+          const col = reg.type === 'ceiling' ? '#3b82f6' : '#f59e0b'
+          // Same presets as room property dropdowns
+          const CEILING_PRESETS_EXTRA = [
+            { id: 'int_heated',    label: 'Intermediate floor — heated room above',    u: 0.0  },
+            { id: 'int_unheated',  label: 'Intermediate floor — unheated space above', u: 0.25 },
+            { id: 'heated',        label: 'Heated room above',                         u: 0.0  },
+            { id: 'pitched_100',   label: 'Pitched — 100mm ins',                       u: 0.25 },
+            { id: 'pitched_150',   label: 'Pitched — 150mm ins',                       u: 0.16 },
+            { id: 'pitched_200',   label: 'Pitched — 200mm ins',                       u: 0.13 },
+            { id: 'pitched_none',  label: 'Pitched — no insulation',                   u: 2.0  },
+            { id: 'flat',          label: 'Flat roof — insulated',                     u: 0.18 },
+          ]
+          const CONSTR = reg.type === 'floor' ? FLOOR_PRESETS : CEILING_PRESETS_EXTRA
+          return (
+            <div className="w-72 xl:w-80 bg-white border-l border-gray-200 overflow-y-auto flex-shrink-0">
+              <div className="p-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded" style={{ background: col }}/>
+                    <div className="text-sm font-semibold text-gray-900 capitalize">
+                      {reg.type === 'floor' ? 'Floor construction' : 'Ceiling insulation'}
+                    </div>
+                  </div>
+                  <button onClick={() => {
+                    setInsulRegions((prev: any[]) => prev.filter((r: any) => r.id !== selectedRegionId))
+                    setSelectedRegionId(null)
+                  }} className="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded-lg px-2 py-1">
+                    Delete
+                  </button>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Label</label>
+                  <input type="text" className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500"
+                    value={reg.label || ''}
+                    onChange={e => setInsulRegions(prev => prev.map(r => r.id !== selectedRegionId ? r : { ...r, label: e.target.value }))}/>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Construction type</label>
+                  <select className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500 bg-white"
+                    value={reg.construction || ''}
+                    onChange={e => {
+                      const preset = CONSTR.find(c => c.id === e.target.value)
+                      setInsulRegions(prev => prev.map(r => r.id !== selectedRegionId ? r : {
+                        ...r, construction: e.target.value, uValue: preset?.u ?? r.uValue
+                      }))
+                    }}>
+                    <option value="">Select...</option>
+                    {CONSTR.map(c => <option key={c.id} value={c.id}>{c.label} (U{c.u})</option>)}
+                    <option value="custom">— Custom U-value —</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">U-value (W/m²K)</label>
+                  <input type="number" step={0.01} min={0}
+                    className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500"
+                    value={reg.uValue}
+                    onChange={e => setInsulRegions(prev => prev.map(r => r.id !== selectedRegionId ? r : { ...r, uValue: parseFloat(e.target.value) || 0 }))}/>
+                </div>
+                {reg.type === 'floor' && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Insulation thickness (mm)</label>
+                    <input type="number" step={25} min={0}
+                      className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500"
+                      value={reg.insulationMm || 0}
+                      onChange={e => setInsulRegions(prev => prev.map(r => r.id !== selectedRegionId ? r : { ...r, insulationMm: parseInt(e.target.value) || 0 }))}/>
+                  </div>
+                )}
+                <div className="bg-gray-50 rounded-xl p-3 text-xs text-gray-500">
+                  <div className="flex justify-between"><span>Type</span><span className="capitalize font-medium">{reg.type}</span></div>
+                  <div className="flex justify-between mt-1"><span>U-value</span><span className="font-medium">{reg.uValue} W/m²K</span></div>
+                  {reg.type === 'floor' && <div className="flex justify-between mt-1"><span>Insulation</span><span className="font-medium">{reg.insulationMm}mm</span></div>}
+                </div>
+                <p className="text-xs text-gray-400">Right-click region on canvas to delete. Click ↩ Rooms to return to rooms mode.</p>
+              </div>
+            </div>
+          )
+        })()}
+
+        {(selectedRoom || selectedElem) && activeLayerMode === 'rooms' && (
           <div className="w-72 xl:w-80 bg-white border-l border-gray-200 overflow-y-auto flex-shrink-0">
             <div className="p-4 space-y-4">
 
