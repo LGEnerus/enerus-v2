@@ -37,12 +37,31 @@ function DashboardInner() {
   async function loadData() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) { router.push('/login'); return }
-    const [{ data: u }, { data: ip }, { data: jd }] = await Promise.all([
+    const [{ data: u }, { data: ip }] = await Promise.all([
       (supabase as any).from('users').select('*').eq('id', session.user.id).single(),
       (supabase as any).from('installer_profiles').select('*').eq('user_id', session.user.id).single(),
-      (supabase as any).from('jobs').select('id,reference,bus_status,bus_eligible,created_at,updated_at,customers(first_name,last_name,address_line1,postcode),job_stages(stage,status)').eq('installer_id', session.user.id).order('updated_at', { ascending: false })
     ])
-    setUser(u); setProfile(ip); setJobs(jd || [])
+    setUser(u); setProfile(ip)
+
+    // Jobs may have installer_id = user.id OR installer_id = installer_profile.id
+    // Query both to be safe
+    const profileId = ip?.id
+    const { data: jd1 } = await (supabase as any)
+      .from('jobs')
+      .select('id,reference,bus_status,bus_eligible,created_at,updated_at,customers(first_name,last_name,address_line1,postcode),job_stages(stage,status)')
+      .eq('installer_id', session.user.id)
+      .order('updated_at', { ascending: false })
+    const { data: jd2 } = profileId ? await (supabase as any)
+      .from('jobs')
+      .select('id,reference,bus_status,bus_eligible,created_at,updated_at,customers(first_name,last_name,address_line1,postcode),job_stages(stage,status)')
+      .eq('installer_id', profileId)
+      .order('updated_at', { ascending: false }) : { data: [] }
+    // Merge and deduplicate by id
+    const allJobs = [...(jd1 || []), ...(jd2 || [])]
+    const seen = new Set<string>()
+    const jd = allJobs.filter(j => { if (seen.has(j.id)) return false; seen.add(j.id); return true })
+    jd.sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    setJobs(jd)
     setLoading(false)
   }
 
