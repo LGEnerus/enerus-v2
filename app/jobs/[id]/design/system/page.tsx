@@ -7,590 +7,425 @@ import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { ULTRAHEAT_RADIATORS, radOutput } from '@/lib/radiators'
 
-// ─── RoomData type (canonical room record from design page) ──────────────────
-type RoomData = {
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type CanvasRoom = {
   id: string
   name: string
   roomType: string
   floor: number
-  lengthMm: number
-  widthMm: number
-  heightMm: number
-  areaMm2: number
-  extWallU: number
-  windowU: number
-  doorU: number
-  floorU: number
-  ceilingU: number
-  extWallAreaMm2: number
-  windowAreaMm2: number
-  doorAreaMm2: number
-  floorAdj: string
-  ceilingAdj: string
-  achOverride: number | null
-  hasOpenFlue: boolean
-  fabricLossW: number
-  ventLossW: number
-  totalLossW: number
-  canvasRoomId?: string
+  heatLossW: number
+  elements: { id: string; type: string; wallIndex: number; position: number; widthMm?: number }[]
+  vertices: { x: number; y: number }[]
 }
 
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type RoomSpec = RoomData & {
-  designTempC: number
-  hasOpenFlue: boolean
+type RoomEmitter = {
+  roomId: string
+  roomName: string
+  roomType: string
+  floor: number
+  heatLossW: number
+  emitterType: 'radiator' | 'ufh' | 'none'
   selectedRadiators: { radiatorId: string; quantity: number }[]
+  ufhPipeSpacingMm: number
+  ufhOutputWm2: number
 }
 
-type SystemSpec = {
-  emitterType: string
-  flowTemp: number
-  returnTemp: number
-  hpManufacturer: string
-  hpModel: string
-  hpOutputKw: number
-  hpSoundPowerDb: number
-  cylinderSizeLitres: number
-  cylinderManufacturer: string
-  cylinderModel: string
-  cylinderType: string
-  bufferTankL: number
-  antifreezePct: number
-  noiseDistanceM: number
-  noiseReflectiveSurfaces: number
-  noiseHasBarrier: boolean
-  noiseBarrierAttenuation: number
-  noiseAssessmentLocation: string
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getFloorName(f: number): string {
+  return f === 0 ? 'Ground floor' : f === 1 ? 'First floor' : f === 2 ? 'Second floor' : `Floor ${f}`
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const ROOM_TEMPS: Record<string, number> = {
-  'Living room': 21, 'Dining room': 21, 'Kitchen': 18, 'Bedroom': 18,
-  'Bathroom': 22, 'En-suite': 22, 'Hall / Landing': 18, 'Study': 21,
-  'Utility room': 16, 'WC': 18, 'Conservatory': 21, 'Garage': 10, 'Other': 18,
+function calcDeltaT(flowTemp: number, returnTemp: number, roomTemp: number): number {
+  return (flowTemp + returnTemp) / 2 - roomTemp
 }
 
-const ROOM_ACH: Record<string, number> = {
-  'Living room': 1.5, 'Dining room': 1.5, 'Kitchen': 2.0, 'Bedroom': 1.0,
-  'Bathroom': 2.0, 'En-suite': 2.0, 'Hall / Landing': 1.5, 'Study': 1.5,
-  'Utility room': 2.0, 'WC': 2.0, 'Conservatory': 1.5, 'Garage': 0.5, 'Other': 1.5,
+function roomTempC(roomType: string): number {
+  const temps: Record<string, number> = {
+    'Living room': 21, 'Dining room': 21, 'Kitchen': 18, 'Bedroom': 18,
+    'Bathroom': 22, 'En-suite': 22, 'Hall / Landing': 18, 'Study': 21,
+    'Utility room': 18, 'WC': 18, 'Conservatory': 21, 'Playroom': 21,
+  }
+  return temps[roomType] || 21
 }
 
-const MCS031_SPF: number[][] = [
-  [20,4.5,4.2,3.9,3.6,3.3,3.0,2.7,3.8,3.5,3.2],
-  [30,4.3,4.0,3.7,3.4,3.1,2.8,2.6,3.6,3.3,3.0],
-  [40,4.1,3.8,3.5,3.2,2.9,2.7,2.5,3.4,3.1,2.8],
-  [50,3.9,3.6,3.3,3.0,2.8,2.6,2.4,3.2,2.9,2.7],
-  [60,3.7,3.4,3.1,2.9,2.7,2.5,2.3,3.0,2.8,2.6],
-  [80,3.5,3.2,2.9,2.7,2.6,2.4,2.2,2.8,2.6,2.4],
-  [100,3.3,3.0,2.8,2.6,2.5,2.3,2.1,2.7,2.5,2.3],
-  [120,3.1,2.9,2.7,2.5,2.4,2.2,2.0,2.6,2.4,2.2],
-  [999,2.9,2.7,2.5,2.4,2.3,2.1,1.9,2.5,2.3,2.1],
-]
-
-function getSPF(shl: number, emitter: string, flowTemp: number): { spf: number; stars: number } {
-  const row = MCS031_SPF.find(r => shl <= r[0]) || MCS031_SPF[MCS031_SPF.length - 1]
-  const col = emitter === 'ufh'
-    ? (flowTemp <= 35 ? 1 : flowTemp <= 40 ? 2 : 3)
-    : emitter === 'radiators'
-    ? (flowTemp <= 45 ? 4 : flowTemp <= 50 ? 5 : flowTemp <= 55 ? 6 : 7)
-    : (flowTemp <= 45 ? 8 : flowTemp <= 50 ? 9 : 10)
-  const spf = row[col]
-  return { spf, stars: spf >= 4.0 ? 6 : spf >= 3.5 ? 5 : spf >= 3.0 ? 4 : spf >= 2.7 ? 3 : spf >= 2.4 ? 2 : 1 }
+function suggestRadiator(
+  requiredW: number, flowTemp: number, returnTemp: number, roomType: string
+): { radiatorId: string; quantity: number } | null {
+  const dt = calcDeltaT(flowTemp, returnTemp, roomTempC(roomType))
+  const suitable = ULTRAHEAT_RADIATORS
+    .map(r => ({ ...r, output: radOutput(r, dt) }))
+    .filter(r => r.output >= requiredW)
+    .sort((a, b) => a.output - b.output)
+  if (suitable.length > 0) return { radiatorId: suitable[0].id, quantity: 1 }
+  const largest = ULTRAHEAT_RADIATORS
+    .map(r => ({ ...r, output: radOutput(r, dt) }))
+    .sort((a, b) => b.output - a.output)[0]
+  if (largest && largest.output * 2 >= requiredW) return { radiatorId: largest.id, quantity: 2 }
+  return null
 }
 
-function calcFlowRate(outputW: number, flowTemp: number, returnTemp: number): number {
-  const dt = flowTemp - returnTemp
-  if (dt <= 0) return 0
-  return Math.round((outputW / (dt * 4186 / 60) / 1000) * 100) / 100
+function getSPF(flowTemp: number): number {
+  if (flowTemp <= 35) return 3.8
+  if (flowTemp <= 40) return 3.5
+  if (flowTemp <= 45) return 3.2
+  if (flowTemp <= 50) return 2.8
+  if (flowTemp <= 55) return 2.5
+  return 2.2
 }
 
-function recalcVent(room: RoomSpec, designTempExt: number): number {
-  const roomTemp = room.designTempC || ROOM_TEMPS[room.roomType] || 21
-  const dT = roomTemp - designTempExt
-  const area = room.areaMm2 > 0 ? room.areaMm2 / 1e6 : (room.lengthMm * room.widthMm) / 1e6
-  const baseAch = ROOM_ACH[room.roomType] || 1.5
-  const ach = (room.achOverride !== null ? room.achOverride : baseAch) + (room.hasOpenFlue ? 1.5 : 0)
-  const volume = area * (room.heightMm / 1000)
-  return Math.round(Math.max(0, 0.33 * ach * volume * dT))
-}
+// ─── Component ───────────────────────────────────────────────────────────────
 
-const defaultSystem: SystemSpec = {
-  emitterType: 'radiators', flowTemp: 50, returnTemp: 40,
-  hpManufacturer: '', hpModel: '', hpOutputKw: 0, hpSoundPowerDb: 63,
-  cylinderSizeLitres: 200, cylinderManufacturer: '', cylinderModel: '',
-  cylinderType: 'indirect', bufferTankL: 0, antifreezePct: 20,
-  noiseDistanceM: 3, noiseReflectiveSurfaces: 1,
-  noiseHasBarrier: false, noiseBarrierAttenuation: 5,
-  noiseAssessmentLocation: 'Nearest neighbour window/door',
-}
-
-// ─── Component ────────────────────────────────────────────────────────────────
-
-export default function SystemSpecPage() {
+export default function EmitterSpecPage() {
   const params = useParams()
   const jobId = params.id as string
 
-  const [rooms, setRooms] = useState<RoomSpec[]>([])
-  const [system, setSystem] = useState<SystemSpec>(defaultSystem)
+  const [rooms, setRooms] = useState<RoomEmitter[]>([])
+  const [flowTemp, setFlowTemp] = useState(50)
+  const [returnTemp, setReturnTemp] = useState(40)
   const [customer, setCustomer] = useState<any>(null)
+  const [totalHeatLossW, setTotalHeatLossW] = useState(0)
   const [designTempExt, setDesignTempExt] = useState(-4)
-  const [totalFloorAreaM2, setTotalFloorAreaM2] = useState(85)
-  const [numBedrooms, setNumBedrooms] = useState(3)
-  const [expandRoom, setExpandRoom] = useState<string | null>(null)
-  const [radSuggest, setRadSuggest] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [saveError, setSaveError] = useState('')
+  const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [noRooms, setNoRooms] = useState(false)
+  const [expandedRoom, setExpandedRoom] = useState<string | null>(null)
+  const [radFilter, setRadFilter] = useState({ height: '', type: '' })
 
   useEffect(() => { load() }, [jobId])
 
   async function load() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) { window.location.replace('/login'); return }
-
     const { data: jd } = await (supabase as any).from('jobs').select('*').eq('id', jobId).single()
     if (!jd) { window.location.replace('/jobs'); return }
-
     const { data: cd } = await (supabase as any).from('customers').select('*').eq('id', jd.customer_id).single()
     setCustomer(cd)
-
-    const { data: sd } = await (supabase as any)
-      .from('system_designs').select('*').eq('job_id', jobId).single()
-
-    if (!sd) { setNoRooms(true); setLoading(false); return }
-
-    const di = sd.design_inputs || {}
-
-    // Load settings
-    if (di.settings) {
-      setDesignTempExt(di.settings.designTempExt || -4)
-      setTotalFloorAreaM2(di.settings.totalFloorAreaM2 || 85)
-      setNumBedrooms(di.settings.numBedrooms || 3)
-    }
-
-    // Load system spec if previously saved
-    if (di.systemSpec) setSystem(di.systemSpec)
-
-    // ── Load rooms ──────────────────────────────────────────────────────────────
-    // di.rooms is the RoomData array saved by the design page
-    const rawRooms: RoomData[] = di.rooms || []
-
-    if (rawRooms.length === 0) { setNoRooms(true); setLoading(false); return }
-
-    // Merge saved radiator selections (from design page) into room specs
-    const savedRads: Record<string, { id: string; qty: number }[]> = di.selectedRadiators || {}
-    // Also merge from systemSpec.roomSpecs if previously saved here
-    const savedRoomSpecs: RoomSpec[] = di.roomSpecs || []
-
-    const specs: RoomSpec[] = rawRooms.map(r => {
-      // Check if we have a previously saved spec for this room
-      const prevSpec = savedRoomSpecs.find(s => s.id === r.id)
-      const prevRads = savedRads[r.id] || []
-
+    const { data: sd } = await (supabase as any).from('system_designs').select('*').eq('job_id', jobId).single()
+    if (!sd?.design_inputs) { setLoading(false); return }
+    const di = sd.design_inputs
+    const canvasRooms: CanvasRoom[] = di.rooms || []
+    const savedEmitters: RoomEmitter[] = di.emitterSpecs || []
+    setDesignTempExt(di.designTempExt || -4)
+    if (di.flowTemp) setFlowTemp(di.flowTemp)
+    if (di.returnTemp) setReturnTemp(di.returnTemp)
+    const totalW = canvasRooms.reduce((s: number, r: CanvasRoom) => s + (r.heatLossW || 0), 0)
+    setTotalHeatLossW(totalW)
+    const emitters: RoomEmitter[] = canvasRooms.map(cr => {
+      const saved = savedEmitters.find(e => e.roomId === cr.id)
+      const hasUfh = cr.elements.some(el => el.type === 'ufh')
+      const heatLoss = cr.heatLossW || 0
+      if (saved) return { ...saved, heatLossW: heatLoss, roomName: cr.name || cr.roomType }
+      const emitterType: 'radiator' | 'ufh' = hasUfh ? 'ufh' : 'radiator'
+      let selectedRadiators: { radiatorId: string; quantity: number }[] = []
+      if (emitterType === 'radiator' && heatLoss > 0) {
+        const s = suggestRadiator(heatLoss, di.flowTemp || 50, di.returnTemp || 40, cr.roomType)
+        if (s) selectedRadiators = [s]
+      }
       return {
-        ...r,
-        // Live-editable fields — use previously saved values or defaults
-        designTempC: prevSpec?.designTempC ?? (ROOM_TEMPS[r.roomType] || 21),
-        hasOpenFlue: prevSpec?.hasOpenFlue ?? r.hasOpenFlue ?? false,
-        // Merge radiators from design page and any previously saved here
-        selectedRadiators: prevSpec?.selectedRadiators ?? prevRads.map(sr => ({ radiatorId: sr.id, quantity: sr.qty })),
+        roomId: cr.id, roomName: cr.name || cr.roomType, roomType: cr.roomType,
+        floor: cr.floor, heatLossW: heatLoss, emitterType, selectedRadiators,
+        ufhPipeSpacingMm: 200, ufhOutputWm2: 80,
       }
     })
-
-    setRooms(specs)
+    setRooms(emitters)
     setLoading(false)
   }
 
-  function updRoom(id: string, updates: Partial<RoomSpec>) {
+  function updRoom(roomId: string, updates: Partial<RoomEmitter>) {
+    setRooms(prev => prev.map(r => r.roomId !== roomId ? r : { ...r, ...updates }))
+  }
+
+  function addRadiator(roomId: string, radiatorId: string) {
     setRooms(prev => prev.map(r => {
-      if (r.id !== id) return r
-      const updated = { ...r, ...updates }
-      // Recalculate ventilation loss with new parameters
-      const ventLoss = recalcVent(updated, designTempExt)
-      return { ...updated, ventLossW: ventLoss, totalLossW: updated.fabricLossW + ventLoss }
+      if (r.roomId !== roomId) return r
+      const existing = r.selectedRadiators.find(s => s.radiatorId === radiatorId)
+      if (existing) return { ...r, selectedRadiators: r.selectedRadiators.map(s => s.radiatorId === radiatorId ? { ...s, quantity: s.quantity + 1 } : s) }
+      return { ...r, selectedRadiators: [...r.selectedRadiators, { radiatorId, quantity: 1 }] }
     }))
   }
 
-  // ─── Computed values ──────────────────────────────────────────────────────────
-
-  const deltaT = (system.flowTemp + system.returnTemp) / 2 - 21
-  const totalW = rooms.reduce((s: number, r: RoomSpec) => s + r.totalLossW, 0)
-  const shl = totalFloorAreaM2 > 0 ? Math.round(totalW / totalFloorAreaM2) : 0
-  const recKw = Math.ceil(totalW / 1000)
-  const { spf, stars } = getSPF(shl, system.emitterType, system.flowTemp)
-  const annualHeat = Math.round((totalW / ((21 - designTempExt) * 1000)) * 2200 * 24)
-  const annualElec = Math.round(annualHeat / spf)
-  const annualDHW = Math.round(45 * numBedrooms * 365 * 4.18 * 0.001 / 1.7) * 100
-  const noiseLevel = Math.round((
-    system.hpSoundPowerDb
-    - 20 * Math.log10(system.noiseDistanceM)
-    - 8 + 3
-    + system.noiseReflectiveSurfaces * 3
-    - (system.noiseHasBarrier ? system.noiseBarrierAttenuation : 0)
-  ) * 10) / 10
-  const noiseOk = noiseLevel <= 37
-  const minCylinder = numBedrooms <= 2 ? 150 : numBedrooms <= 3 ? 200 : numBedrooms <= 4 ? 250 : 300
-
-  const totalRadOutput = rooms.reduce((sum: number, room: RoomSpec) =>
-    sum + room.selectedRadiators.reduce((rs: number, sr: {radiatorId: string; quantity: number}) => {
-      const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
-      return rs + (rad ? radOutput(rad, deltaT) * sr.quantity : 0)
-    }, 0), 0)
-
-  // ─── Save ─────────────────────────────────────────────────────────────────────
+  function removeRadiator(roomId: string, radiatorId: string) {
+    setRooms(prev => prev.map(r => r.roomId !== roomId ? r : {
+      ...r, selectedRadiators: r.selectedRadiators.filter(s => s.radiatorId !== radiatorId)
+    }))
+  }
 
   async function save(redirect?: string) {
-    setSaving(true)
-    setSaveError('')
+    setSaving(true); setError('')
     try {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) return
-
-      // Load existing design_inputs to merge (not overwrite rooms)
-      const { data: sd } = await (supabase as any)
-        .from('system_designs').select('design_inputs').eq('job_id', jobId).single()
+      const { data: sd } = await (supabase as any).from('system_designs').select('design_inputs').eq('job_id', jobId).single()
       const existing = sd?.design_inputs || {}
-
-      // Build selectedRadiators in design page format too
-      const selectedRadiators: Record<string, { id: string; qty: number }[]> = {}
-      rooms.forEach(r => {
-        if (r.selectedRadiators.length > 0) {
-          selectedRadiators[r.id] = r.selectedRadiators.map(sr => ({ id: sr.radiatorId, qty: sr.quantity }))
-        }
-      })
-
-      const payload = {
-        design_inputs: {
-          ...existing,          // Keep rooms, canvasRooms, settings from design page
-          systemSpec: system,   // New: system spec
-          roomSpecs: rooms,     // New: room specs with radiators + edits
-          selectedRadiators,    // Keep in sync for design page
-        },
-        // Schema columns
-        flow_temp_c: system.flowTemp,
-        return_temp_c: system.returnTemp,
-        emitter_type: system.emitterType,
-        hp_manufacturer: system.hpManufacturer,
-        hp_model: system.hpModel,
-        hp_size_kw: system.hpOutputKw,
-        cylinder_size_l: system.cylinderSizeLitres,
-        cylinder_manufacturer: system.cylinderManufacturer,
-        cylinder_model: system.cylinderModel,
-        buffer_tank_l: system.bufferTankL || null,
-        antifreeze_pct: system.antifreezePct,
-        scop_estimate: spf,
-        annual_kwh: annualHeat + annualDHW,
-        // New columns
-        total_heat_loss_w: totalW,
-        specific_heat_loss_w_m2: shl,
-        recommended_hp_kw: recKw,
-        spf_estimate: spf,
-        star_rating: stars,
-        annual_heat_demand_kwh: annualHeat,
-        annual_elec_space_kwh: annualElec,
-        annual_elec_dhw_kwh: annualDHW,
-        noise_level_db: noiseLevel,
-        noise_compliant: noiseOk,
-        mcs_031_compliant: true,
-        mcs_compliant: true,
-        designed_by: session.user.id,
-        designed_at: new Date().toISOString(),
+      const { error: e } = await (supabase as any).from('system_designs').update({
+        design_inputs: { ...existing, emitterSpecs: rooms, flowTemp, returnTemp },
         updated_at: new Date().toISOString(),
-      }
-
-      const { error } = await (supabase as any)
-        .from('system_designs').update(payload).eq('job_id', jobId)
-
-      if (error) { setSaveError(`Save failed: ${error.message}`); setSaving(false); return }
-
-      await (supabase as any).from('audit_log').insert({
-        job_id: jobId, user_id: session.user.id,
-        action: 'system_spec_saved', stage: 'design',
-        entity_type: 'system_design',
-        description: `System spec: ${system.hpManufacturer} ${system.hpModel} ${system.hpOutputKw}kW, SPF ${spf}, ${stars}★, noise ${noiseLevel}dB`,
-      })
-
-      setSaving(false); setSaved(true)
-      setTimeout(() => setSaved(false), 3000)
+      }).eq('job_id', jobId)
+      if (e) throw e
+      setSaved(true); setTimeout(() => setSaved(false), 3000)
       if (redirect) window.location.href = redirect
-    } catch (e: any) {
-      setSaveError(`Error: ${e.message}`)
-      setSaving(false)
-    }
+    } catch (e: any) { setError(e.message) }
+    setSaving(false)
   }
 
-  const inp = "w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500 bg-white"
-  const sel = "w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-500 bg-white"
-  const lbl = "block text-xs font-medium text-gray-500 mb-1"
+  // Derived totals
+  const totalRadOutput = rooms.reduce((sum, room) => {
+    if (room.emitterType !== 'radiator') return sum
+    const dt = calcDeltaT(flowTemp, returnTemp, roomTempC(room.roomType))
+    return sum + room.selectedRadiators.reduce((s, sr) => {
+      const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
+      return s + (rad ? radOutput(rad, dt) * sr.quantity : 0)
+    }, 0)
+  }, 0)
 
-  if (loading) {
-    return <div className="min-h-screen bg-gray-50 flex items-center justify-center"><p className="text-sm text-gray-400">Loading...</p></div>
-  }
+  const spf = getSPF(flowTemp)
+  const annualHeat = totalHeatLossW > 0 ? Math.round((totalHeatLossW / ((21 - designTempExt) * 1000)) * 2200 * 24) : 0
+  const annualElec = annualHeat > 0 ? Math.round(annualHeat / spf) : 0
+  const floors = [...new Set(rooms.map(r => r.floor))].sort((a, b) => a - b)
 
-  if (noRooms) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center gap-4">
-        <div className="text-sm font-medium text-gray-700">No rooms found in this design</div>
-        <p className="text-xs text-gray-500">Complete the floor plan design first, then save before continuing here.</p>
-        <a href={`/jobs/${jobId}/design`} className="bg-emerald-700 text-white text-xs font-medium px-4 py-2 rounded-lg hover:bg-emerald-800">
-          ← Go to design tool
-        </a>
-      </div>
-    )
-  }
+  const heights = [...new Set(ULTRAHEAT_RADIATORS.map(r => r.height_mm))].sort((a, b) => a - b)
+  const types = [...new Set(ULTRAHEAT_RADIATORS.map(r => r.type))]
+  const filteredRads = ULTRAHEAT_RADIATORS.filter(r =>
+    (!radFilter.height || r.height_mm === parseInt(radFilter.height)) &&
+    (!radFilter.type || r.type === radFilter.type)
+  )
+
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <p className="text-sm text-gray-400">Loading...</p>
+    </div>
+  )
 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
-        <div className="flex items-center gap-3">
-          <div className="w-7 h-7 bg-emerald-700 rounded-lg flex items-center justify-center">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="white"><path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z"/></svg>
+      <div className="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-10">
+        <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-7 h-7 bg-emerald-700 rounded-lg flex items-center justify-center flex-shrink-0">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="white"><path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z"/></svg>
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-gray-900">Emitter Specification</div>
+              {customer && <div className="text-xs text-gray-400 truncate">{customer.first_name} {customer.last_name} · {customer.address_line1}</div>}
+            </div>
           </div>
-          <div>
-            <div className="text-xs font-semibold text-gray-900">System & Radiator Specification</div>
-            {customer && <div className="text-xs text-gray-400">{customer.first_name} {customer.last_name} · {customer.address_line1}</div>}
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <a href={`/jobs/${jobId}/design`} className="text-xs text-gray-400 hover:text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg">← Floor plan</a>
+            <a href={`/jobs/${jobId}/design/heatpump`} className="text-xs text-emerald-700 border border-emerald-300 px-3 py-1.5 rounded-lg hover:bg-emerald-50">Heat pump →</a>
+            {error && <span className="text-xs text-red-600">{error}</span>}
+            <button onClick={() => save()} disabled={saving}
+              className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-medium px-4 py-1.5 rounded-lg">
+              {saving ? 'Saving...' : saved ? '✓ Saved' : 'Save'}
+            </button>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <a href={`/jobs/${jobId}/design`} className="text-xs text-gray-400 hover:text-gray-600">← Floor plan</a>
-          <a href={`/jobs/${jobId}`} className="text-xs text-gray-400 hover:text-gray-600">Job →</a>
-          {saveError && <span className="text-xs text-red-600">{saveError}</span>}
-          <button onClick={() => save()} disabled={saving}
-            className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-medium px-4 py-1.5 rounded-lg">
-            {saving ? 'Saving...' : saved ? '✓ Saved' : 'Save'}
-          </button>
         </div>
       </div>
 
-      {/* MCS strip */}
-      <div className="bg-emerald-700 text-white px-4 py-1 flex items-center gap-4 text-xs">
-        <span className="font-medium">MCS</span>
-        <span>MIS 3005-D</span><span>MCS 031 v4.0</span><span>BS EN 12831-1</span><span>MCS 020(a)</span>
-        <span className="ml-auto">Design temp: {designTempExt}°C</span>
-      </div>
+      <div className="max-w-5xl mx-auto px-4 py-5 space-y-4">
 
-      {/* Summary metrics */}
-      <div className="max-w-6xl mx-auto px-4 pt-5 pb-2">
+        {/* Summary */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {[
-            { label: 'Total heat loss', value: `${(totalW/1000).toFixed(2)} kW`, sub: `${shl} W/m²`, ok: true },
-            { label: 'Recommended ASHP', value: `≥ ${recKw} kW`, sub: 'at design conditions', ok: true },
-            { label: 'MCS 031 SPF', value: String(spf), sub: `${'★'.repeat(stars)}${'☆'.repeat(6-stars)} ${stars}/6`, ok: true },
-            { label: 'Annual electricity', value: `${(annualElec+annualDHW).toLocaleString()} kWh`, sub: 'space + DHW', ok: true },
-            { label: 'Noise check', value: `${noiseLevel} dB`, sub: noiseOk ? '✓ MCS 020(a) pass' : '✗ Exceeds 37dB', ok: noiseOk },
-          ].map(m => (
-            <div key={m.label} className={`rounded-xl p-3 border ${!m.ok ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
-              <div className="text-xs text-gray-400">{m.label}</div>
-              <div className={`text-lg font-bold mt-0.5 ${!m.ok ? 'text-red-700' : 'text-gray-900'}`}>{m.value}</div>
-              <div className={`text-xs mt-0.5 ${!m.ok ? 'text-red-600' : 'text-gray-400'}`}>{m.sub}</div>
+            { label: 'Total heat loss', value: totalHeatLossW > 0 ? `${(totalHeatLossW/1000).toFixed(1)} kW` : '—', warn: false },
+            { label: 'Emitter output', value: totalRadOutput > 0 ? `${(totalRadOutput/1000).toFixed(1)} kW` : '—', warn: totalRadOutput > 0 && totalRadOutput < totalHeatLossW * 0.95 },
+            { label: 'Flow / return', value: `${flowTemp}°C / ${returnTemp}°C`, warn: false },
+            { label: 'Est. SPF', value: spf.toFixed(1), warn: false },
+            { label: 'Annual electricity', value: annualElec > 0 ? `${annualElec.toLocaleString()} kWh` : '—', warn: false },
+          ].map(s => (
+            <div key={s.label} className={`${s.warn ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'} border rounded-xl p-3`}>
+              <div className="text-xs text-gray-400">{s.label}</div>
+              <div className={`text-base font-bold mt-0.5 ${s.warn ? 'text-amber-700' : 'text-gray-900'}`}>{s.value}</div>
             </div>
           ))}
         </div>
 
-        {/* Radiator coverage banner */}
-        {totalRadOutput > 0 && (
-          <div className={`mt-3 rounded-lg px-4 py-2.5 flex items-center justify-between text-xs ${totalRadOutput >= totalW ? 'bg-emerald-50 border border-emerald-200' : 'bg-amber-50 border border-amber-200'}`}>
-            <span className={totalRadOutput >= totalW ? 'text-emerald-700' : 'text-amber-700'}>
-              {totalRadOutput >= totalW ? '✓' : '⚠'} Radiator coverage: <strong>{(totalRadOutput/1000).toFixed(1)}kW</strong> selected vs <strong>{(totalW/1000).toFixed(1)}kW</strong> required
-            </span>
-            {totalRadOutput < totalW && <span className="text-amber-600">Short by {((totalW-totalRadOutput)/1000).toFixed(1)}kW — add more radiators below</span>}
+        {/* Flow temp slider */}
+        <div className="bg-white border border-gray-200 rounded-2xl p-4">
+          <div className="text-xs font-semibold text-gray-700 mb-3">System temperatures — affects all emitter output calculations</div>
+          <div className="flex flex-wrap items-center gap-6">
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-gray-500">Flow temp</label>
+              <input type="range" min={35} max={70} step={5} value={flowTemp}
+                onChange={e => setFlowTemp(parseInt(e.target.value))} className="w-36 accent-emerald-600"/>
+              <span className="text-sm font-bold text-gray-900 w-10">{flowTemp}°C</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-gray-500">Return temp</label>
+              <input type="range" min={25} max={60} step={5} value={returnTemp}
+                onChange={e => setReturnTemp(parseInt(e.target.value))} className="w-36 accent-emerald-600"/>
+              <span className="text-sm font-bold text-gray-900 w-10">{returnTemp}°C</span>
+            </div>
+            <div className="text-xs text-gray-400">
+              SPF {spf.toFixed(1)} · {annualHeat.toLocaleString()} kWh heat/yr · {annualElec.toLocaleString()} kWh elec/yr
+            </div>
+          </div>
+        </div>
+
+        {rooms.length === 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-center">
+            <div className="text-2xl mb-2">📐</div>
+            <div className="text-sm font-semibold text-amber-800">No rooms found</div>
+            <div className="text-xs text-amber-700 mt-1 mb-3">Draw rooms on the floor plan and save before coming here.</div>
+            <a href={`/jobs/${jobId}/design`} className="text-xs bg-emerald-700 text-white px-4 py-2 rounded-xl">Go to floor plan →</a>
           </div>
         )}
-      </div>
 
-      <div className="max-w-6xl mx-auto px-4 py-4">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-
-          {/* ── Room list ─────────────────────────────────────────────────────── */}
-          <div className="lg:col-span-2 space-y-3">
-            <div>
-              <h2 className="text-sm font-semibold text-gray-900">Room-by-room specification</h2>
-              <p className="text-xs text-gray-400 mt-0.5">Adjust room parameters — heat loss updates live. Add radiators from the Ultraheat catalogue.</p>
+        {/* Rooms by floor */}
+        {floors.map(floor => (
+          <div key={floor}>
+            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mt-4 mb-2">
+              {getFloorName(floor)} · {rooms.filter(r => r.floor === floor).length} rooms
             </div>
 
-            {rooms.map(room => {
-              const roomRadOutput = room.selectedRadiators.reduce((s: number, sr: {radiatorId: string; quantity: number}) => {
-                const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
-                return s + (rad ? radOutput(rad, deltaT) * sr.quantity : 0)
-              }, 0)
-              const radOk = roomRadOutput >= room.totalLossW * 0.95
-              const areaM2 = room.areaMm2 > 0 ? room.areaMm2 / 1e6 : room.lengthMm * room.widthMm / 1e6
-              const effectiveAch = (room.achOverride ?? ROOM_ACH[room.roomType] ?? 1.5) + (room.hasOpenFlue ? 1.5 : 0)
+            {rooms.filter(r => r.floor === floor).map(room => {
+              const dt = calcDeltaT(flowTemp, returnTemp, roomTempC(room.roomType))
+              const currentOutput = room.emitterType === 'radiator'
+                ? room.selectedRadiators.reduce((s, sr) => {
+                    const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
+                    return s + (rad ? radOutput(rad, dt) * sr.quantity : 0)
+                  }, 0)
+                : room.emitterType === 'ufh' ? room.heatLossW : 0 // UFH assumed adequate if selected
+              const isAdequate = currentOutput >= room.heatLossW * 0.95
+              const isExpanded = expandedRoom === room.roomId
 
               return (
-                <div key={room.id} className={`bg-white border rounded-xl overflow-hidden ${room.selectedRadiators.length > 0 && !radOk ? 'border-amber-300' : 'border-gray-200'}`}>
-                  {/* Room header */}
-                  <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-50"
-                    onClick={() => setExpandRoom(expandRoom === room.id ? null : room.id)}>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-gray-900">{room.name || room.roomType}</div>
-                      <div className="text-xs text-gray-400">
-                        {room.roomType} · {areaM2.toFixed(1)}m² · {room.designTempC}°C · ACH {effectiveAch.toFixed(1)}
-                        {room.hasOpenFlue && <span className="text-amber-600 ml-1">+open flue</span>}
+                <div key={room.roomId} className="bg-white border border-gray-200 rounded-2xl overflow-hidden mb-2">
+                  <button className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left"
+                    onClick={() => setExpandedRoom(isExpanded ? null : room.roomId)}>
+                    <div className={`w-1.5 h-10 rounded-full flex-shrink-0 ${
+                      room.heatLossW === 0 ? 'bg-gray-200' :
+                      currentOutput === 0 ? 'bg-red-400' :
+                      isAdequate ? 'bg-emerald-500' : 'bg-amber-400'
+                    }`}/>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-semibold text-gray-900">{room.roomName}</span>
+                        <span className="text-xs text-gray-400">{room.roomType}</span>
+                        {room.emitterType === 'ufh' && <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">♨ UFH</span>}
+                      </div>
+                      <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                        <span className="text-xs text-gray-400">Required <strong className="text-gray-700">{room.heatLossW.toLocaleString()}W</strong></span>
+                        <span className="text-xs text-gray-400">Output <strong className={currentOutput === 0 ? 'text-red-500' : isAdequate ? 'text-emerald-600' : 'text-amber-600'}>{currentOutput.toLocaleString()}W</strong></span>
+                        {currentOutput === 0 && room.heatLossW > 0 && <span className="text-xs text-red-500">⚠ No emitter</span>}
+                        {isAdequate && currentOutput > 0 && <span className="text-xs text-emerald-600">✓ Adequate</span>}
+                        {!isAdequate && currentOutput > 0 && <span className="text-xs text-amber-600">+{(room.heatLossW - currentOutput).toLocaleString()}W needed</span>}
                       </div>
                     </div>
-                    <div className="flex items-center gap-4 flex-shrink-0">
-                      <div className="text-right">
-                        <div className="text-sm font-bold text-gray-900">{room.totalLossW}W</div>
-                        <div className={`text-xs ${radOk ? 'text-emerald-600' : room.selectedRadiators.length > 0 ? 'text-amber-600' : 'text-gray-400'}`}>
-                          {room.selectedRadiators.length > 0
-                            ? `${roomRadOutput}W ${radOk ? '✓' : '✗'}`
-                            : 'No radiator'}
-                        </div>
-                      </div>
-                      <span className="text-gray-400 text-xs">{expandRoom === room.id ? '▲' : '▼'}</span>
+                    <div className="flex items-center gap-1 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                      {(['radiator', 'ufh'] as const).map(t => (
+                        <button key={t} onClick={() => updRoom(room.roomId, { emitterType: t })}
+                          className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${room.emitterType === t ? 'bg-emerald-700 text-white border-emerald-700' : 'border-gray-200 text-gray-500 hover:border-emerald-300'}`}>
+                          {t === 'radiator' ? '🔥 Rad' : '♨ UFH'}
+                        </button>
+                      ))}
                     </div>
-                  </div>
+                    <svg width="12" height="8" viewBox="0 0 12 8" className={`flex-shrink-0 text-gray-300 transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none">
+                      <path d="M1 1l5 5 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                  </button>
 
-                  {expandRoom === room.id && (
-                    <div className="border-t border-gray-100 px-4 py-4 space-y-4 bg-gray-50">
-
-                      {/* Quick param editing */}
-                      <div>
-                        <div className="text-xs font-semibold text-gray-700 mb-2">Room parameters — live heat loss update</div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                          <div>
-                            <label className={lbl}>Design temp (°C)</label>
-                            <input type="number" className={inp} value={room.designTempC} step={0.5}
-                              onChange={e => updRoom(room.id, { designTempC: parseFloat(e.target.value)||21 })}/>
-                            <div className="text-xs text-gray-400 mt-0.5">Default: {ROOM_TEMPS[room.roomType]||21}°C</div>
-                          </div>
-                          <div>
-                            <label className={lbl}>Air changes/hr</label>
-                            <input type="number" className={inp} value={room.achOverride ?? ''} step={0.1}
-                              placeholder={`${ROOM_ACH[room.roomType]||1.5} (CIBSE)`}
-                              onChange={e => { const v=parseFloat(e.target.value); updRoom(room.id, { achOverride: isNaN(v)?null:v }) }}/>
-                            <div className="text-xs text-gray-400 mt-0.5">Effective: {effectiveAch.toFixed(1)}</div>
-                          </div>
-                          <div>
-                            <label className={lbl}>Floor</label>
-                            <select className={sel} value={room.floorAdj}
-                              onChange={e => updRoom(room.id, { floorAdj: e.target.value })}>
-                              <option value="ground">Ground (10°C)</option>
-                              <option value="heated">Heated space</option>
-                              <option value="unheated">Unheated</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label className={lbl}>Ceiling</label>
-                            <select className={sel} value={room.ceilingAdj}
-                              onChange={e => updRoom(room.id, { ceilingAdj: e.target.value })}>
-                              <option value="heated">Heated above</option>
-                              <option value="roof">Roof / outside</option>
-                              <option value="unheated">Unheated loft</option>
-                            </select>
-                          </div>
-                        </div>
-                        <label className="flex items-center gap-2 mt-2 cursor-pointer w-fit">
-                          <input type="checkbox" checked={room.hasOpenFlue}
-                            onChange={e => updRoom(room.id, { hasOpenFlue: e.target.checked })} className="rounded"/>
-                          <span className="text-xs text-gray-700">Open flued fire or stove</span>
-                          {room.hasOpenFlue && <span className="text-xs bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full">+1.5 ACH</span>}
-                        </label>
-                      </div>
-
-                      {/* Heat loss breakdown */}
-                      <div className="grid grid-cols-3 gap-2">
-                        {[['Fabric', room.fabricLossW], ['Ventilation', room.ventLossW], ['Total', room.totalLossW]].map(([k,v]) => (
-                          <div key={k} className={`rounded-lg p-2.5 text-center border ${k==='Total'?'bg-emerald-50 border-emerald-200':'bg-white border-gray-200'}`}>
-                            <div className="text-xs text-gray-400">{k}</div>
-                            <div className={`font-bold text-sm ${k==='Total'?'text-emerald-700':'text-gray-900'}`}>{v}W</div>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Selected radiators */}
+                  {isExpanded && room.emitterType === 'radiator' && (
+                    <div className="border-t border-gray-100 px-4 py-4 space-y-4">
                       {room.selectedRadiators.length > 0 && (
                         <div>
-                          <div className="text-xs font-semibold text-gray-700 mb-2">Selected radiators</div>
+                          <div className="text-xs font-semibold text-gray-700 mb-2">Specified radiators</div>
                           <div className="space-y-1.5">
-                            {room.selectedRadiators.map((sr: {radiatorId: string; quantity: number}, si: number) => {
+                            {room.selectedRadiators.map(sr => {
                               const rad = ULTRAHEAT_RADIATORS.find(r => r.id === sr.radiatorId)
                               if (!rad) return null
-                              const out = radOutput(rad, deltaT)
-                              const totalOut = out * sr.quantity
-                              const fr = calcFlowRate(totalOut, system.flowTemp, system.returnTemp)
+                              const out = radOutput(rad, dt) * sr.quantity
+                              const ok = out >= room.heatLossW * 0.95
                               return (
-                                <div key={si} className="flex items-center justify-between bg-white border border-emerald-200 rounded-lg px-3 py-2">
-                                  <div className="text-xs min-w-0">
-                                    <div className="font-medium text-gray-900">{rad.type} — H{rad.height_mm} × {rad.length_mm}mm × {sr.quantity}</div>
-                                    <div className="text-gray-500 mt-0.5">
-                                      {out}W each ·
-                                      <span className="text-emerald-700 font-semibold mx-1">{totalOut}W total</span>·
-                                      <span className="text-blue-600 ml-1">{fr} l/min</span>
-                                    </div>
+                                <div key={sr.radiatorId} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${ok ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-xs font-medium text-gray-900">{rad.type} — {rad.height_mm}×{rad.length_mm}mm · {rad.depth_mm}mm deep</div>
+                                    <div className="text-xs text-gray-500 mt-0.5">{radOutput(rad, dt).toLocaleString()}W × {sr.quantity} = <strong>{out.toLocaleString()}W</strong> at {flowTemp}°C flow</div>
                                   </div>
-                                  <div className="flex items-center gap-2 flex-shrink-0 ml-3">
-                                    <input type="number" min={1} value={sr.quantity}
-                                      className="w-12 text-xs border border-gray-200 rounded px-2 py-1"
-                                      onChange={e => {
-                                        const rads = [...room.selectedRadiators]
-                                        rads[si] = { ...sr, quantity: parseInt(e.target.value)||1 }
-                                        updRoom(room.id, { selectedRadiators: rads })
-                                      }}/>
-                                    <button
-                                      onClick={() => updRoom(room.id, { selectedRadiators: room.selectedRadiators.filter((_: {radiatorId: string; quantity: number}, i: number) => i!==si) })}
-                                      className="text-red-400 hover:text-red-600 text-sm">✕</button>
+                                  <div className="flex items-center gap-1 flex-shrink-0">
+                                    <button onClick={() => setRooms(prev => prev.map(r => r.roomId !== room.roomId ? r : { ...r, selectedRadiators: r.selectedRadiators.map(s => s.radiatorId !== sr.radiatorId ? s : { ...s, quantity: Math.max(1, s.quantity - 1) }) }))}
+                                      className="w-6 h-6 rounded border border-gray-200 text-xs flex items-center justify-center hover:bg-gray-100">−</button>
+                                    <span className="text-xs w-5 text-center font-bold">{sr.quantity}</span>
+                                    <button onClick={() => setRooms(prev => prev.map(r => r.roomId !== room.roomId ? r : { ...r, selectedRadiators: r.selectedRadiators.map(s => s.radiatorId !== sr.radiatorId ? s : { ...s, quantity: s.quantity + 1 }) }))}
+                                      className="w-6 h-6 rounded border border-gray-200 text-xs flex items-center justify-center hover:bg-gray-100">+</button>
+                                    <button onClick={() => removeRadiator(room.roomId, sr.radiatorId)}
+                                      className="w-6 h-6 rounded border border-red-100 text-red-400 hover:text-red-600 text-xs flex items-center justify-center ml-1">✕</button>
                                   </div>
                                 </div>
                               )
                             })}
-                            {/* Coverage summary */}
-                            <div className={`text-xs px-3 py-2 rounded-lg ${radOk ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
-                              Coverage: <strong>{roomRadOutput}W</strong> · Need: <strong>{room.totalLossW}W</strong>
-                              {radOk ? ' ✓ Adequate' : ` — add ${room.totalLossW - roomRadOutput}W more`}
-                            </div>
                           </div>
                         </div>
                       )}
 
-                      {/* Radiator selection */}
                       <div>
-                        <button onClick={() => setRadSuggest(radSuggest === room.id ? null : room.id)}
-                          className="text-xs text-emerald-700 hover:underline font-medium">
-                          {radSuggest === room.id ? 'Hide catalogue' : `+ Select Ultraheat radiator for ${room.totalLossW}W →`}
-                        </button>
-                        {radSuggest === room.id && (
-                          <div className="mt-2 bg-white border border-gray-200 rounded-xl p-3">
-                            <div className="text-xs text-gray-500 mb-2">
-                              Sized for {room.totalLossW}W · Mean water {(system.flowTemp+system.returnTemp)/2}°C · Room {room.designTempC}°C · ΔT{Math.round(deltaT)}
-                            </div>
-                            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-56 overflow-y-auto">
-                              {ULTRAHEAT_RADIATORS
-                                .filter(r => { const o=radOutput(r,deltaT); return o>=room.totalLossW*0.8&&o<=room.totalLossW*2.8 })
-                                .sort((a,b) => Math.abs(radOutput(a,deltaT)-room.totalLossW)-Math.abs(radOutput(b,deltaT)-room.totalLossW))
-                                .slice(0,12)
-                                .map(rad => {
-                                  const out = radOutput(rad, deltaT)
-                                  const pct = Math.round((out/room.totalLossW-1)*100)
-                                  const fr = calcFlowRate(out, system.flowTemp, system.returnTemp)
-                                  return (
-                                    <button key={rad.id}
-                                      onClick={() => { updRoom(room.id, { selectedRadiators: [...room.selectedRadiators, { radiatorId: rad.id, quantity: 1 }] }); setRadSuggest(null) }}
-                                      className="text-left p-2.5 border border-gray-200 rounded-lg hover:border-emerald-400 hover:bg-emerald-50 transition-colors">
-                                      <div className="text-xs font-semibold text-gray-900">{rad.type}</div>
-                                      <div className="text-xs text-gray-500">H{rad.height_mm} × {rad.length_mm}mm</div>
-                                      <div className="text-xs font-bold text-emerald-700 mt-1">{out}W <span className="text-gray-400 font-normal">+{pct}%</span></div>
-                                      <div className="text-xs text-blue-600">{fr} l/min</div>
-                                      <div className="text-xs text-gray-400">{rad.depth_mm}mm deep</div>
-                                    </button>
-                                  )
-                                })}
-                              {ULTRAHEAT_RADIATORS.filter(r => { const o=radOutput(r,deltaT); return o>=room.totalLossW*0.8&&o<=room.totalLossW*2.8 }).length === 0 && (
-                                <div className="col-span-3 text-xs text-gray-400 py-4 text-center">
-                                  No single radiator matches at this flow temperature. Try adjusting flow temp or using two units.
-                                </div>
-                              )}
-                            </div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-xs font-semibold text-gray-700">Add from catalogue <span className="text-gray-400 font-normal">({filteredRads.length} models)</span></div>
+                          <div className="flex gap-2">
+                            <select value={radFilter.height} onChange={e => setRadFilter(p => ({ ...p, height: e.target.value }))}
+                              className="text-xs border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:border-emerald-400">
+                              <option value="">All heights</option>
+                              {heights.map(h => <option key={h} value={h}>{h}mm</option>)}
+                            </select>
+                            <select value={radFilter.type} onChange={e => setRadFilter(p => ({ ...p, type: e.target.value }))}
+                              className="text-xs border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:border-emerald-400">
+                              <option value="">All types</option>
+                              {types.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
                           </div>
-                        )}
+                        </div>
+                        <div className="max-h-56 overflow-y-auto border border-gray-100 rounded-xl">
+                          {filteredRads.map(rad => {
+                            const out = radOutput(rad, dt)
+                            const meetsReq = out >= room.heatLossW * 0.95
+                            const alreadySelected = room.selectedRadiators.some(s => s.radiatorId === rad.id)
+                            return (
+                              <button key={rad.id} onClick={() => addRadiator(room.roomId, rad.id)}
+                                className={`w-full flex items-center gap-3 px-3 py-2 hover:bg-gray-50 text-left border-b border-gray-50 last:border-0 transition-colors ${alreadySelected ? 'bg-emerald-50' : ''}`}>
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-xs font-medium text-gray-900">{rad.type}</span>
+                                  <span className="text-xs text-gray-400 ml-1.5">{rad.height_mm}×{rad.length_mm}mm · {rad.depth_mm}mm</span>
+                                </div>
+                                <span className={`text-xs font-bold flex-shrink-0 ${meetsReq ? 'text-emerald-600' : 'text-gray-500'}`}>
+                                  {out.toLocaleString()}W {meetsReq ? '✓' : ''}
+                                </span>
+                              </button>
+                            )
+                          })}
+                          {filteredRads.length === 0 && (
+                            <div className="px-3 py-6 text-xs text-gray-400 text-center">No radiators match the filter</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {isExpanded && room.emitterType === 'ufh' && (
+                    <div className="border-t border-gray-100 px-4 py-4">
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-800 mb-3">
+                        UFH zone marked on floor plan. Specify pipe layout below.
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Pipe spacing</label>
+                          <select className="w-full text-xs border border-gray-200 rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
+                            value={room.ufhPipeSpacingMm}
+                            onChange={e => updRoom(room.roomId, { ufhPipeSpacingMm: parseInt(e.target.value) })}>
+                            <option value={100}>100mm — high output</option>
+                            <option value={150}>150mm — medium</option>
+                            <option value={200}>200mm — standard</option>
+                            <option value={300}>300mm — low output</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Design output (W/m²)</label>
+                          <input type="number" className="w-full text-xs border border-gray-200 rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
+                            value={room.ufhOutputWm2}
+                            onChange={e => updRoom(room.roomId, { ufhOutputWm2: parseInt(e.target.value) || 80 })}/>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -598,185 +433,13 @@ export default function SystemSpecPage() {
               )
             })}
           </div>
+        ))}
 
-          {/* ── Right column: HP + cylinder + MCS 031 + noise ─────────────────── */}
-          <div className="space-y-4">
-
-            {/* Heat pump */}
-            <div className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="text-sm font-semibold text-gray-900 mb-3">Heat pump specification</div>
-              <div className="space-y-2.5">
-                <div>
-                  <label className={lbl}>Emitter type</label>
-                  <select className={sel} value={system.emitterType} onChange={e => setSystem(p => ({...p, emitterType: e.target.value}))}>
-                    <option value="radiators">Radiators</option>
-                    <option value="ufh">Underfloor heating</option>
-                    <option value="mixed">Mixed UFH + radiators</option>
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Flow temp (°C)</label>
-                    <input type="number" className={inp} value={system.flowTemp} step={1} onChange={e => setSystem(p => ({...p, flowTemp: parseInt(e.target.value)||50}))}/>
-                  </div>
-                  <div>
-                    <label className={lbl}>Return temp (°C)</label>
-                    <input type="number" className={inp} value={system.returnTemp} step={1} onChange={e => setSystem(p => ({...p, returnTemp: parseInt(e.target.value)||40}))}/>
-                  </div>
-                </div>
-                <div className="bg-gray-50 rounded-lg p-2.5 text-xs grid grid-cols-2 gap-2">
-                  <div><span className="text-gray-400">Mean water</span><div className="font-semibold">{(system.flowTemp+system.returnTemp)/2}°C</div></div>
-                  <div><span className="text-gray-400">ΔT at 21°C room</span><div className="font-semibold">{Math.round(deltaT)}°C</div></div>
-                  <div><span className="text-gray-400">SPF</span><div className="font-semibold">{spf}</div></div>
-                  <div><span className="text-gray-400">Stars</span><div>{'★'.repeat(stars)}{'☆'.repeat(6-stars)}</div></div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Manufacturer</label>
-                    <input type="text" className={inp} value={system.hpManufacturer} placeholder="e.g. Mitsubishi" onChange={e => setSystem(p => ({...p, hpManufacturer: e.target.value}))}/>
-                  </div>
-                  <div>
-                    <label className={lbl}>Model</label>
-                    <input type="text" className={inp} value={system.hpModel} placeholder="e.g. Ecodan 8.5kW" onChange={e => setSystem(p => ({...p, hpModel: e.target.value}))}/>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Rated output (kW)</label>
-                    <input type="number" className={inp} value={system.hpOutputKw} step={0.5} onChange={e => setSystem(p => ({...p, hpOutputKw: parseFloat(e.target.value)||0}))}/>
-                  </div>
-                  <div>
-                    <label className={lbl}>Sound power dB(A)</label>
-                    <input type="number" className={inp} value={system.hpSoundPowerDb} step={0.5} onChange={e => setSystem(p => ({...p, hpSoundPowerDb: parseFloat(e.target.value)||63}))}/>
-                  </div>
-                </div>
-                {system.hpOutputKw > 0 && (
-                  <div className={`text-xs p-2.5 rounded-lg ${system.hpOutputKw >= recKw ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
-                    {system.hpOutputKw >= recKw
-                      ? `✓ Adequate — ${system.hpOutputKw}kW rated, ${recKw}kW required (+${Math.round((system.hpOutputKw/recKw-1)*100)}% headroom)`
-                      : `✗ Undersized — ${system.hpOutputKw}kW rated, need ${recKw}kW`}
-                  </div>
-                )}
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Antifreeze %</label>
-                    <input type="number" className={inp} value={system.antifreezePct} min={0} max={40} step={5} onChange={e => setSystem(p => ({...p, antifreezePct: parseInt(e.target.value)||20}))}/>
-                  </div>
-                  <div>
-                    <label className={lbl}>Buffer tank (L, 0=none)</label>
-                    <input type="number" className={inp} value={system.bufferTankL} min={0} step={25} onChange={e => setSystem(p => ({...p, bufferTankL: parseInt(e.target.value)||0}))}/>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Cylinder */}
-            <div className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="text-sm font-semibold text-gray-900 mb-3">Hot water cylinder</div>
-              <div className="space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Manufacturer</label>
-                    <input type="text" className={inp} value={system.cylinderManufacturer} placeholder="e.g. Gledhill" onChange={e => setSystem(p => ({...p, cylinderManufacturer: e.target.value}))}/>
-                  </div>
-                  <div>
-                    <label className={lbl}>Model</label>
-                    <input type="text" className={inp} value={system.cylinderModel} placeholder="e.g. StainlessLite" onChange={e => setSystem(p => ({...p, cylinderModel: e.target.value}))}/>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Type</label>
-                    <select className={sel} value={system.cylinderType} onChange={e => setSystem(p => ({...p, cylinderType: e.target.value}))}>
-                      <option value="indirect">Indirect (HP coil)</option>
-                      <option value="direct">Direct / immersion</option>
-                      <option value="thermal_store">Thermal store</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className={lbl}>Size (litres)</label>
-                    <input type="number" className={inp} value={system.cylinderSizeLitres} step={25} onChange={e => setSystem(p => ({...p, cylinderSizeLitres: parseInt(e.target.value)||200}))}/>
-                  </div>
-                </div>
-                <div className={`text-xs p-2 rounded-lg ${system.cylinderSizeLitres >= minCylinder ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
-                  MIS 3005-D minimum: {minCylinder}L for {numBedrooms} bedrooms {system.cylinderSizeLitres < minCylinder ? '⚠ Below minimum' : '✓'}
-                </div>
-              </div>
-            </div>
-
-            {/* MCS 031 */}
-            <div className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="text-sm font-semibold text-gray-900 mb-3">MCS 031 Performance estimate</div>
-              <div className="space-y-1.5 text-xs">
-                {[
-                  ['Specific heat loss', `${shl} W/m²`],
-                  ['Estimated SPF', String(spf)],
-                  ['Star rating', `${'★'.repeat(stars)}${'☆'.repeat(6-stars)} ${stars}/6`],
-                  ['Annual heat demand', `${annualHeat.toLocaleString()} kWh`],
-                  ['Annual elec — space', `${annualElec.toLocaleString()} kWh`],
-                  ['Annual elec — DHW', `${annualDHW.toLocaleString()} kWh`],
-                  ['Total annual elec', `${(annualElec+annualDHW).toLocaleString()} kWh`],
-                ].map(([k,v]) => (
-                  <div key={k} className="flex justify-between py-1 border-b border-gray-50 last:border-0">
-                    <span className="text-gray-400">{k}</span>
-                    <span className="font-semibold text-gray-900">{v}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 bg-emerald-50 rounded-lg p-2.5 text-xs text-emerald-800">
-                <div className="font-medium mb-0.5">Mandatory customer disclosure (MCS 031):</div>
-                Estimated {(annualElec+annualDHW).toLocaleString()} kWh/yr (range {Math.round((annualElec+annualDHW)*0.9).toLocaleString()}–{Math.round((annualElec+annualDHW)*1.1).toLocaleString()} kWh/yr)
-              </div>
-            </div>
-
-            {/* Noise MCS 020(a) */}
-            <div className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="text-sm font-semibold text-gray-900 mb-3">MCS 020(a) Noise assessment</div>
-              <div className="space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className={lbl}>Distance to assessment point (m)</label>
-                    <input type="number" className={inp} value={system.noiseDistanceM} step={0.5} min={1} onChange={e => setSystem(p => ({...p, noiseDistanceM: parseFloat(e.target.value)||1}))}/>
-                  </div>
-                  <div>
-                    <label className={lbl}>Reflective surfaces</label>
-                    <select className={sel} value={system.noiseReflectiveSurfaces} onChange={e => setSystem(p => ({...p, noiseReflectiveSurfaces: parseInt(e.target.value)}))}>
-                      <option value={0}>0 — Free field</option>
-                      <option value={1}>1 — One wall</option>
-                      <option value={2}>2 — Corner</option>
-                      <option value={3}>3 — Three surfaces</option>
-                    </select>
-                  </div>
-                </div>
-                <label className="flex items-center gap-2 text-xs cursor-pointer">
-                  <input type="checkbox" checked={system.noiseHasBarrier} onChange={e => setSystem(p => ({...p, noiseHasBarrier: e.target.checked}))} className="rounded"/>
-                  Acoustic barrier present
-                </label>
-                {system.noiseHasBarrier && (
-                  <div>
-                    <label className={lbl}>Barrier attenuation (dB)</label>
-                    <input type="number" className={inp} value={system.noiseBarrierAttenuation} step={0.5} onChange={e => setSystem(p => ({...p, noiseBarrierAttenuation: parseFloat(e.target.value)||0}))}/>
-                  </div>
-                )}
-                <div>
-                  <label className={lbl}>Assessment location description</label>
-                  <input type="text" className={inp} value={system.noiseAssessmentLocation} onChange={e => setSystem(p => ({...p, noiseAssessmentLocation: e.target.value}))}/>
-                </div>
-                <div className={`rounded-xl p-3 text-center border-2 ${noiseOk ? 'bg-emerald-50 border-emerald-300' : 'bg-red-50 border-red-300'}`}>
-                  <div className={`text-2xl font-bold ${noiseOk ? 'text-emerald-700' : 'text-red-700'}`}>{noiseLevel} dB</div>
-                  <div className={`text-xs font-semibold mt-0.5 ${noiseOk ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {noiseOk ? '✓ MCS 020(a) Compliant — below 37dB' : '✗ Non-compliant — exceeds 37dB limit'}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Save + continue */}
-            <button onClick={() => save(`/jobs/${jobId}/design/heatpump`)} disabled={saving}
-              className="w-full bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-semibold py-3 rounded-xl transition-colors">
-              {saving ? 'Saving...' : 'Save Save & return to job → continue to heat pump selection →'}
-            </button>
-          </div>
+        <div className="pt-2 pb-6">
+          <button onClick={() => save(`/jobs/${jobId}/design/heatpump`)} disabled={saving}
+            className="w-full bg-emerald-700 hover:bg-emerald-800 disabled:bg-gray-300 text-white text-sm font-semibold py-3.5 rounded-2xl transition-colors">
+            Save & continue to heat pump selection →
+          </button>
         </div>
       </div>
     </div>

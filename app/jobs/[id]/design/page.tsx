@@ -968,33 +968,27 @@ const DesignCanvas = forwardRef<CanvasRef, Props>(({
 
         {/* Active floor rooms:
             - In rooms mode: render normally (interactive)
-            - In floor/ceiling layer mode: render as ghosts (non-interactive outlines) */}
+            - In floor/ceiling layer mode: render as non-interactive ghost outlines */}
         {activeLayerMode === 'rooms'
           ? <>
               {floorRooms.filter(r => r.id !== selectedId).map(r => renderRoom(r))}
               {floorRooms.filter(r => r.id === selectedId).map(r => renderRoom(r))}
             </>
-          : <>
-              {floorRooms.map(r => (
-                <g key={`layerghst_${r.id}`} opacity={0.4}>
-                  <polygon
-                    points={r.vertices.map(v => { const s = toScreen(v, vp); return `${s.x.toFixed(1)},${s.y.toFixed(1)}` }).join(' ')}
-                    fill="#f0f9ff" stroke="#60a5fa" strokeWidth={2} strokeDasharray="5,3"/>
-                  {(() => {
-                    const pts = r.vertices.map(v => toScreen(v, vp))
-                    const c = polyCentroid(pts)
-                    const lSz = Math.max(7, Math.min(11, mmToPx(1400, vp.zoom)))
-                    return lSz > 6 ? (
-                      <text x={c.x} y={c.y} textAnchor="middle" dominantBaseline="middle"
-                        fontSize={lSz} fill="#3b82f6" fontWeight="500"
-                        style={{ pointerEvents:'none', userSelect:'none' }}>
-                        {r.name || r.roomType}
-                      </text>
-                    ) : null
-                  })()}
+          : floorRooms.map(r => {
+              const pts = r.vertices.map(v => toScreen(v, vp))
+              const ptsStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+              const c = polyCentroid(pts)
+              const lSz = Math.max(7, Math.min(11, mmToPx(1400, vp.zoom)))
+              return (
+                <g key={`layerghst_${r.id}`} opacity={0.5} style={{ pointerEvents: 'none' }}>
+                  <polygon points={ptsStr} fill="#eff6ff" stroke="#93c5fd" strokeWidth={2} strokeDasharray="6,3"/>
+                  {lSz > 6 && <text x={c.x} y={c.y} textAnchor="middle" dominantBaseline="middle"
+                    fontSize={lSz} fill="#60a5fa" fontWeight="500" style={{ userSelect:'none' }}>
+                    {r.name || r.roomType}
+                  </text>}
                 </g>
-              ))}
-            </>
+              )
+            })
         }
 
         {/* Draw preview */}
@@ -1547,6 +1541,13 @@ export default function DesignPage() {
 
           {saveError && <span className="text-xs text-red-600">{saveError}</span>}
           <a href={`/jobs/${jobId}`} className="text-xs text-gray-400 hover:text-gray-600 hidden sm:block">← Job</a>
+          <a href={`/jobs/${jobId}/noise`} className="text-xs text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 hidden sm:block">
+            🔊 Noise
+          </a>
+          <button onClick={() => save(`/jobs/${jobId}/design/system`)} disabled={saving}
+            className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-400 text-emerald-700 text-xs font-medium px-3 py-1.5 rounded-lg hidden sm:block">
+            Emitter spec →
+          </button>
           <button onClick={() => save()} disabled={saving}
             className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-xs font-medium px-3 py-1.5 rounded-lg">
             {saving ? '...' : saved ? '✓' : 'Save'}
@@ -1639,7 +1640,7 @@ export default function DesignPage() {
             bgImage={bgImage}
             onRoomsChange={handleRoomsChange}
             onSelect={handleSelect}
-            onToolChange={(t) => { setTool(t); if (t === 'select') setDrawingInsulFloor(null); }}
+            onToolChange={(t) => { setTool(t) }}
             drawingInsulFloor={drawingInsulFloor}
             drawingInsulType={drawingInsulType}
             insulRegions={insulRegions}
