@@ -3,456 +3,215 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useEffect, useState } from 'react'
-import { useParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 
 const STAGE_ORDER = [
-  'customer', 'survey', 'design', 'proposal', 'acceptance',
-  'bus_application', 'materials', 'installation', 'commissioning', 'handover'
+  'customer','survey','design','proposal','acceptance',
+  'bus_application','materials','installation','commissioning','handover'
 ]
-
-const STAGE_INFO: Record<string, { label: string; description: string; tasks: string[]; action?: string; actionLabel?: string; links?: Array<{href:string;label:string;icon:string}> }> = {
-  customer: {
-    label: 'Customer',
-    description: 'Customer registered and property details confirmed',
-    tasks: ['Customer details recorded', 'Property address confirmed', 'EPC data retrieved', 'BUS eligibility checked'],
-  },
-  survey: {
-    label: 'Site survey',
-    description: 'Site survey completed and documented',
-    tasks: ['Site survey carried out', 'Heat loss survey completed', 'Survey report uploaded', 'Photos taken and uploaded'],
-    links: [{ href: 'documents', label: 'Upload survey photos', icon: '📷' }],
-  },
-  design: {
-    label: 'System design',
-    description: 'MCS-compliant system design completed using the design tool',
-    tasks: ['Room-by-room heat loss calculated (BS EN 12831-1:2017)', 'MCS 031 performance estimate completed', 'System specified and HP sized', 'MCS 020(a) noise check completed', 'Design signed off'],
-    action: 'design',
-    actionLabel: 'Open design tool →',
-    links: [
-      { href: 'noise', label: 'Noise assessment', icon: '🔊' },
-      { href: 'documents', label: 'Documents', icon: '📎' },
-    ],
-  },
-  proposal: {
-    label: 'Proposal',
-    description: 'Customer proposal and quotation issued',
-    tasks: ['Quotation prepared', 'MCS 031 performance estimate included', 'Proposal document sent to customer', 'Customer questions addressed'],
-    links: [{ href: 'proposal-view', label: 'View proposal PDF', icon: '📄' }],
-  },
-  acceptance: {
-    label: 'Customer acceptance',
-    description: 'Customer has accepted the proposal',
-    tasks: ['Customer acceptance link sent', 'Customer has reviewed proposal', 'Acceptance signed and recorded', 'Cooling-off period noted'],
-    action: 'bus',
-    actionLabel: 'Send acceptance link →',
-    links: [{ href: 'bus', label: 'BUS & acceptance tracker', icon: '🏷' }],
-  },
-  bus_application: {
-    label: 'BUS application',
-    description: 'Boiler Upgrade Scheme application submitted',
-    tasks: ['Eligibility confirmed', 'BUS application submitted to Ofgem', 'Ofgem reference obtained', 'Grant approval confirmed'],
-    action: 'bus',
-    actionLabel: 'Open BUS tracker →',
-  },
-  materials: {
-    label: 'Materials',
-    description: 'Equipment and materials ordered and delivered',
-    tasks: ['Equipment ordered from supplier', 'Delivery date confirmed', 'Materials received and checked on site'],
-    links: [{ href: 'documents', label: 'Upload delivery notes', icon: '📦' }],
-  },
-  installation: {
-    label: 'Installation',
-    description: 'Heat pump system installed',
-    tasks: ['Installation completed', 'Building regulations notification submitted', 'F-gas records completed (if applicable)', 'Commissioning checklist prepared'],
-    links: [{ href: 'documents', label: 'Upload install photos', icon: '📷' }],
-  },
-  commissioning: {
-    label: 'Commissioning',
-    description: 'System commissioned and tested',
-    tasks: ['System commissioned to MCS standard', 'MCS commissioning checklist completed', 'System pressure test within range', 'Flow/return temperatures verified', 'Customer demonstration completed'],
-    action: 'commissioning',
-    actionLabel: 'Open commissioning checklist →',
-    links: [{ href: 'documents', label: 'Upload commissioning docs', icon: '📋' }],
-  },
-  handover: {
-    label: 'Handover',
-    description: 'System handed over to customer',
-    tasks: ['Customer handover completed', 'User manual and controls training given', 'Warranty registered with manufacturer', 'MCS certificate submitted', 'BUS grant redeemed (if applicable)'],
-    action: 'mcs-cert',
-    actionLabel: 'MCS certificate →',
-    links: [{ href: 'documents', label: 'Upload handover pack', icon: '📎' }],
-  },
+const STAGE_LABEL: Record<string,string> = {
+  customer:'Customer', survey:'Survey', design:'Design', proposal:'Proposal',
+  acceptance:'Acceptance', bus_application:'BUS', materials:'Materials',
+  installation:'Installation', commissioning:'Commissioning', handover:'Handover',
+}
+const BUS_COLORS: Record<string,string> = {
+  not_started:'bg-gray-100 text-gray-400', eligible:'bg-blue-100 text-blue-700',
+  submitted:'bg-amber-100 text-amber-700', approved:'bg-emerald-100 text-emerald-700',
+  redeemed:'bg-emerald-700 text-white', rejected:'bg-red-100 text-red-700',
 }
 
-export default function JobDetailPage() {
-  const params = useParams()
-  const jobId = params.id as string
-
-  const [job, setJob] = useState<any>(null)
-  const [stages, setStages] = useState<any[]>([])
-  const [customer, setCustomer] = useState<any>(null)
-  const [heatLoss, setHeatLoss] = useState<any>(null)
-  const [systemDesign, setSystemDesign] = useState<any>(null)
-  const [documents, setDocuments] = useState<any[]>([])
+export default function DashboardPage() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const isWelcome = searchParams.get('welcome') === '1'
+  const [user, setUser] = useState<any>(null)
+  const [profile, setProfile] = useState<any>(null)
+  const [jobs, setJobs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
-  const [completing, setCompleting] = useState<string | null>(null)
-  const [activeStage, setActiveStage] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [stageFilter, setStageFilter] = useState('')
 
-  useEffect(() => {
-    load()
-  }, [jobId])
+  useEffect(() => { loadData() }, [])
 
-  async function load() {
+  async function loadData() {
     const { data: { session } } = await supabase.auth.getSession()
-    if (!session) { window.location.replace('/login'); return }
-
-    const { data: jobData } = await (supabase as any)
-      .from('jobs').select('*').eq('id', jobId).single()
-    if (!jobData) { window.location.replace('/jobs'); return }
-    setJob(jobData)
-    setActiveStage(jobData.current_stage)
-
-    const { data: stagesData } = await (supabase as any)
-      .from('job_stages').select('*').eq('job_id', jobId)
-    setStages(stagesData || [])
-
-    const { data: custData } = await (supabase as any)
-      .from('customers').select('*').eq('id', jobData.customer_id).single()
-    setCustomer(custData)
-
-    const { data: hlData } = await (supabase as any)
-      .from('heat_loss_calculations').select('*').eq('job_id', jobId).single()
-    setHeatLoss(hlData)
-
-    const { data: sdData } = await (supabase as any)
-      .from('system_designs').select('*').eq('job_id', jobId).single()
-    setSystemDesign(sdData)
-
-    const { data: docsData } = await (supabase as any)
-      .from('mcs_documents').select('*').eq('job_id', jobId).order('stage')
-    setDocuments(docsData || [])
-
+    if (!session) { router.push('/login'); return }
+    const [{ data: u }, { data: ip }, { data: jd }] = await Promise.all([
+      (supabase as any).from('users').select('*').eq('id', session.user.id).single(),
+      (supabase as any).from('installer_profiles').select('*').eq('user_id', session.user.id).single(),
+      (supabase as any).from('jobs').select('id,reference,bus_status,bus_eligible,created_at,updated_at,customers(first_name,last_name,address_line1,postcode),job_stages(stage,status)').eq('installer_id', session.user.id).order('updated_at', { ascending: false })
+    ])
+    setUser(u); setProfile(ip); setJobs(jd || [])
     setLoading(false)
   }
 
-  async function completeStage(stage: string) {
-    setCompleting(stage)
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-
-    await (supabase as any)
-      .from('job_stages')
-      .update({ status: 'complete', completed_by: session.user.id, completed_at: new Date().toISOString() })
-      .eq('job_id', jobId).eq('stage', stage)
-
-    await (supabase as any).from('audit_log').insert({
-      job_id: jobId,
-      user_id: session.user.id,
-      action: 'stage_completed',
-      stage,
-      entity_type: 'job_stage',
-      description: `Stage completed: ${STAGE_INFO[stage]?.label}`,
-    })
-
-    await load()
-    setActiveStage(job?.current_stage || stage)
-    setCompleting(null)
+  function getCurrentStage(job: any) {
+    const s: any[] = job.job_stages || []
+    return s.find(x => x.status === 'in_progress') || [...s].reverse().find(x => x.status === 'complete') || { stage: 'customer', status: 'locked' }
   }
 
-  function getStageStatus(stage: string): string {
-    return stages.find(s => s.stage === stage)?.status || 'locked'
-  }
+  const profileFields = [profile?.company_name, profile?.address_line1, profile?.postcode, profile?.phone, profile?.email, profile?.mcs_certificate_number, profile?.public_liability_insurer, profile?.logo_url]
+  const profilePct = Math.round((profileFields.filter(Boolean).length / profileFields.length) * 100)
+  const mcsExpiry = profile?.mcs_expiry_date
+  const mcsDaysLeft = mcsExpiry ? Math.floor((new Date(mcsExpiry).getTime() - Date.now()) / 86400000) : null
+  const activeJobs = jobs.filter(j => getCurrentStage(j).status === 'in_progress').length
+  const completedJobs = jobs.filter(j => getCurrentStage(j).stage === 'handover' && getCurrentStage(j).status === 'complete').length
+  const busApproved = jobs.filter(j => j.bus_status === 'approved' || j.bus_status === 'redeemed').length
 
-  function getDocStatusPill(status: string) {
-    const map: Record<string, string> = {
-      not_generated: 'bg-gray-100 text-gray-400',
-      generated: 'bg-blue-50 text-blue-700',
-      signed: 'bg-emerald-50 text-emerald-700',
-      approved: 'bg-emerald-100 text-emerald-800',
-      rejected: 'bg-red-50 text-red-700',
-    }
-    return map[status] || 'bg-gray-100 text-gray-400'
-  }
+  const filtered = jobs.filter(j => {
+    const c = j.customers
+    const name = `${c?.first_name} ${c?.last_name} ${c?.address_line1} ${c?.postcode}`.toLowerCase()
+    const { stage } = getCurrentStage(j)
+    return (!search || name.includes(search.toLowerCase())) && (!stageFilter || stage === stageFilter)
+  })
 
-  if (loading) {
-    return <div className="min-h-screen bg-gray-50 flex items-center justify-center"><p className="text-sm text-gray-400">Loading job...</p></div>
-  }
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><p className="text-sm text-gray-400">Loading...</p></div>
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+      {/* Top bar */}
+      <div className="bg-white border-b border-gray-200 px-6 h-14 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-emerald-700 rounded-lg flex items-center justify-center">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="white"><path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z" /></svg>
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-gray-900">Enerus Plus</div>
-            <div className="text-xs text-gray-400 uppercase tracking-wide">MCS Umbrella</div>
-          </div>
+          <span className="text-sm font-semibold text-gray-900">Dashboard</span>
+          {mcsDaysLeft !== null && mcsDaysLeft <= 60 && (
+            <a href="/profile" className={`text-xs px-2.5 py-1 rounded-full font-medium ${mcsDaysLeft <= 14 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+              ⚠ MCS expires in {mcsDaysLeft}d
+            </a>
+          )}
         </div>
-        <div className="flex items-center gap-4">
-          <a href="/jobs" className="text-xs text-gray-400 hover:text-gray-600">← All jobs</a>
-          <span className="text-xs font-mono text-gray-400 bg-gray-100 px-2 py-1 rounded">{job?.reference}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-500 hidden sm:block">{user?.full_name}</span>
+          <button onClick={async () => { await supabase.auth.signOut(); router.push('/login') }}
+            className="text-xs text-gray-400 hover:text-gray-600">Sign out</button>
+          <a href="/jobs/new" className={`text-xs font-medium px-4 py-1.5 rounded-lg transition-colors ${profilePct === 100 ? 'bg-emerald-700 text-white hover:bg-emerald-800' : 'bg-gray-100 text-gray-400 pointer-events-none'}`}>
+            + New job
+          </a>
         </div>
       </div>
 
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="px-6 py-6">
 
-        {/* Customer summary */}
-        <div className="bg-white border border-gray-200 rounded-xl p-5 mb-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-base font-medium text-gray-900">{customer?.first_name} {customer?.last_name}</div>
-              <div className="text-xs text-gray-500 mt-0.5">{customer?.address_line1}, {customer?.city}, {customer?.postcode}</div>
-              <div className="text-xs text-gray-400 mt-0.5">{customer?.phone}{customer?.email ? ` · ${customer.email}` : ''}</div>
+        {/* Banners */}
+        {isWelcome && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-5 py-3 mb-5 flex items-center gap-3">
+            <span className="text-xl">🎉</span>
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-emerald-900">Welcome to Enerus Plus</div>
+              <div className="text-xs text-emerald-700 mt-0.5">Complete your profile to unlock all features.</div>
             </div>
-            <div className="flex items-center gap-4 text-right">
-              {customer?.epc_rating && (
-                <div className="text-center">
-                  <div className="text-xs text-gray-400 mb-0.5">EPC</div>
-                  <div className="text-xl font-semibold text-gray-900">{customer.epc_rating}</div>
-                </div>
-              )}
-              {systemDesign ? (
-                <div className="text-center border-l border-gray-100 pl-4">
-                  <div className="text-xs text-gray-400 mb-0.5">Design</div>
-                  <div className="text-lg font-semibold text-emerald-700">{systemDesign.recommended_hp_kw} kW</div>
-                  <div className="text-xs text-gray-400">SPF {systemDesign.spf_estimate} · {'★'.repeat(systemDesign.star_rating || 0)}</div>
-                </div>
-              ) : heatLoss ? (
-                <div className="text-center border-l border-gray-100 pl-4">
-                  <div className="text-xs text-gray-400 mb-0.5">Est. heat loss</div>
-                  <div className="text-lg font-semibold text-emerald-700">{heatLoss.recommended_hp_kw} kW</div>
-                </div>
-              ) : null}
-              <div className="text-center border-l border-gray-100 pl-4">
-                <div className="text-xs text-gray-400 mb-0.5">BUS</div>
-                <div className={`text-xs font-medium px-2 py-1 rounded-full ${
-                  ['eligible','approved','redeemed'].includes(job?.bus_status) ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'
-                }`}>
-                  {job?.bus_status === 'eligible' ? '£7,500' : job?.bus_status === 'approved' ? 'Approved' : job?.bus_status === 'redeemed' ? 'Redeemed' : 'Not claiming'}
-                </div>
-              </div>
-            </div>
+            <a href="/profile" className="text-xs text-emerald-700 border border-emerald-300 px-3 py-1.5 rounded-lg hover:bg-emerald-100">Complete profile →</a>
           </div>
-        </div>
-
-        {/* Stage pipeline */}
-        <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6">
-          <div className="text-sm font-medium text-gray-900 mb-5">Workflow stages</div>
-
-          <div className="flex mb-6 overflow-x-auto pb-1">
-            {STAGE_ORDER.map((stage, i) => {
-              const status = getStageStatus(stage)
-              const isActive = stage === activeStage
-              return (
-                <div key={stage} className="flex items-center flex-shrink-0">
-                  <button
-                    onClick={() => setActiveStage(stage)}
-                    className={`flex flex-col items-center px-2 py-2 rounded-lg transition-colors min-w-[72px] ${isActive ? 'bg-emerald-50' : 'hover:bg-gray-50'}`}
-                  >
-                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium mb-1 ${
-                      status === 'complete' ? 'bg-emerald-700 text-white' :
-                      status === 'in_progress' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' :
-                      status === 'flagged' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-400'
-                    }`}>
-                      {status === 'complete' ? '✓' : i + 1}
-                    </div>
-                    <div className={`text-xs text-center leading-tight ${
-                      isActive ? 'text-emerald-700 font-medium' :
-                      status === 'complete' ? 'text-gray-600' :
-                      status === 'locked' ? 'text-gray-300' : 'text-gray-500'
-                    }`}>
-                      {STAGE_INFO[stage]?.label}
-                    </div>
-                  </button>
-                  {i < STAGE_ORDER.length - 1 && (
-                    <div className={`w-4 h-0.5 flex-shrink-0 ${
-                      getStageStatus(STAGE_ORDER[i + 1]) !== 'locked' || status === 'complete' ? 'bg-emerald-300' : 'bg-gray-100'
-                    }`} />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-
-          {activeStage && (
-            <div className={`border rounded-xl p-5 ${
-              getStageStatus(activeStage) === 'in_progress' ? 'border-emerald-200 bg-emerald-50' :
-              getStageStatus(activeStage) === 'complete' ? 'border-gray-200 bg-gray-50' : 'border-gray-200 bg-gray-50'
-            }`}>
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <div className="text-sm font-medium text-gray-900">{STAGE_INFO[activeStage]?.label}</div>
-                  <div className="text-xs text-gray-500 mt-0.5">{STAGE_INFO[activeStage]?.description}</div>
-                </div>
-                <div className={`text-xs font-medium px-2.5 py-1 rounded-full flex-shrink-0 ml-4 ${
-                  getStageStatus(activeStage) === 'complete' ? 'bg-emerald-100 text-emerald-800' :
-                  getStageStatus(activeStage) === 'in_progress' ? 'bg-emerald-50 text-emerald-700 border border-emerald-300' :
-                  'bg-gray-100 text-gray-400'
-                }`}>
-                  {getStageStatus(activeStage) === 'complete' ? 'Complete' :
-                   getStageStatus(activeStage) === 'in_progress' ? 'In progress' : 'Locked'}
-                </div>
-              </div>
-
-              <div className="space-y-2 mb-4">
-                {STAGE_INFO[activeStage]?.tasks.map((task, i) => (
-                  <div key={i} className="flex items-center gap-2.5">
-                    <div className={`w-4 h-4 rounded flex-shrink-0 flex items-center justify-center ${
-                      getStageStatus(activeStage) === 'complete' ? 'bg-emerald-700' : 'border border-gray-300 bg-white'
-                    }`}>
-                      {getStageStatus(activeStage) === 'complete' && (
-                        <svg width="8" height="6" viewBox="0 0 8 6" fill="none">
-                          <path d="M1 3l2 2 4-4" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                        </svg>
-                      )}
-                    </div>
-                    <span className={`text-xs ${
-                      getStageStatus(activeStage) === 'complete' ? 'text-gray-600' :
-                      getStageStatus(activeStage) === 'locked' ? 'text-gray-300' : 'text-gray-700'
-                    }`}>{task}</span>
-                  </div>
-                ))}
-              </div>
-
-              {/* Design stage — rich summary card */}
-              {activeStage === 'design' && systemDesign && (
-                <div className="mb-3 space-y-2">
-                  {/* Heat loss + system */}
-                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-                    <div className="text-xs font-semibold text-emerald-800 mb-2">System design summary</div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                      <div><div className="text-emerald-600">Heat loss</div><div className="font-bold text-base text-gray-900">{(systemDesign.total_heat_loss_w / 1000).toFixed(2)} kW</div></div>
-                      <div><div className="text-emerald-600">Recommended HP</div><div className="font-bold text-base text-emerald-700">{systemDesign.recommended_hp_kw} kW min</div></div>
-                      <div><div className="text-emerald-600">Flow temp</div><div className="font-bold text-gray-900">{systemDesign.flow_temp_c}°C / {systemDesign.design_inputs?.systemSpec?.returnTemp || 40}°C</div></div>
-                      <div><div className="text-emerald-600">MCS 031 SPF</div><div className="font-bold text-gray-900">{systemDesign.spf_estimate} <span className="text-amber-400">{'★'.repeat(systemDesign.star_rating || 0)}</span></div></div>
-                    </div>
-                    {systemDesign.design_inputs?.systemSpec?.hpModel && (
-                      <div className="mt-3 pt-3 border-t border-emerald-200 grid grid-cols-2 gap-3 text-xs">
-                        <div><div className="text-emerald-600">Heat pump</div><div className="font-semibold text-gray-900">{systemDesign.design_inputs.systemSpec.hpManufacturer} {systemDesign.design_inputs.systemSpec.hpModel}</div></div>
-                        <div><div className="text-emerald-600">Cylinder</div><div className="font-semibold text-gray-900">{systemDesign.design_inputs.systemSpec.cylinderManufacturer || '—'} {systemDesign.design_inputs.systemSpec.cylinderModel || '—'}</div></div>
-                      </div>
-                    )}
-                    {/* Noise result */}
-                    {systemDesign.noise_level_db && (
-                      <div className={`mt-2 text-xs px-2 py-1 rounded-lg inline-block ${systemDesign.noise_compliant ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-                        MCS 020(a) noise: {systemDesign.noise_level_db} dB {systemDesign.noise_compliant ? '✓ Compliant' : '✗ Non-compliant'}
-                      </div>
-                    )}
-                  </div>
-                  {/* Design tool links */}
-                  <div className="flex flex-wrap gap-2">
-                    <a href={`/jobs/${jobId}/design`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
-                      ✏ Edit floor plan
-                    </a>
-                    <a href={`/jobs/${jobId}/design/system`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
-                      🔥 Radiators
-                    </a>
-                    <a href={`/jobs/${jobId}/design/heatpump`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
-                      ⚡ Heat pump
-                    </a>
-                    <a href={`/jobs/${jobId}/design/cylinder`} className="text-xs text-emerald-700 hover:underline border border-emerald-200 px-3 py-1.5 rounded-lg bg-white">
-                      💧 Cylinder
-                    </a>
-                    <a href={`/jobs/${jobId}/noise`} className="text-xs text-gray-600 hover:underline border border-gray-200 px-3 py-1.5 rounded-lg bg-white">
-                      🔊 Noise assessment
-                    </a>
-                    <a href={`/api/proposal/${jobId}`} target="_blank" className="text-xs bg-emerald-700 text-white hover:bg-emerald-800 px-3 py-1.5 rounded-lg font-medium">
-                      📄 View proposal →
-                    </a>
-                  </div>
-                </div>
-              )}
-              {/* No design yet */}
-              {activeStage === 'design' && !systemDesign && getStageStatus(activeStage) === 'in_progress' && (
-                <div className="mb-3 bg-gray-50 border border-gray-200 rounded-xl p-4 text-xs text-gray-500">
-                  No design started yet. Use the design tool to calculate heat loss and specify the system.
-                </div>
-              )}
-
-              {/* Stage quick links */}
-              {STAGE_INFO[activeStage]?.links && (
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {STAGE_INFO[activeStage].links!.map(link => (
-                    <a key={link.href} href={`/jobs/${jobId}/${link.href}`}
-                      className="text-xs flex items-center gap-1.5 border border-gray-200 text-gray-600 hover:border-emerald-400 hover:text-emerald-700 px-3 py-1.5 rounded-lg bg-white transition-colors">
-                      <span>{link.icon}</span>{link.label}
-                    </a>
-                  ))}
-                </div>
-              )}
-
+        )}
+        {profilePct < 100 && !isWelcome && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-3 mb-5 flex items-center gap-3">
+            <div className="flex-1">
               <div className="flex items-center gap-3">
-                {getStageStatus(activeStage) === 'in_progress' && (
-                  <>
-                    {STAGE_INFO[activeStage]?.action && (
-                      <a
-                        href={`/jobs/${jobId}/${STAGE_INFO[activeStage].action}`}
-                        className="bg-white border border-emerald-600 text-emerald-700 text-sm font-medium px-5 py-2.5 rounded-lg transition-colors hover:bg-emerald-50"
-                      >
-                        {STAGE_INFO[activeStage].actionLabel}
-                      </a>
-                    )}
-                    <button
-                      onClick={() => completeStage(activeStage)}
-                      disabled={completing === activeStage}
-                      className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors"
-                    >
-                      {completing === activeStage ? 'Completing...' : `Mark complete →`}
-                    </button>
-                  </>
-                )}
-
-                {getStageStatus(activeStage) === 'locked' && (
-                  <div className="text-xs text-gray-400 flex items-center gap-1.5">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                      <rect x="2" y="5" width="8" height="6" rx="1" stroke="currentColor" strokeWidth="1.2"/>
-                      <path d="M4 5V3.5a2 2 0 014 0V5" stroke="currentColor" strokeWidth="1.2" fill="none"/>
-                    </svg>
-                    Complete the previous stage to unlock this one
-                  </div>
-                )}
-                {getStageStatus(activeStage) === 'complete' && (
-                  <div className="text-xs text-emerald-700 flex items-center gap-1.5">
-                    <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
-                      <path d="M1 5l3.5 3.5 6.5-8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    Stage completed
-                  </div>
-                )}
+                <span className="text-xs font-medium text-amber-900">Profile {profilePct}% complete</span>
+                <div className="flex-1 max-w-28 bg-amber-200 rounded-full h-1.5"><div className="bg-amber-600 h-1.5 rounded-full" style={{ width: `${profilePct}%` }}/></div>
               </div>
+              <div className="text-xs text-amber-700 mt-0.5">Add MCS number, insurance and branding to unlock full platform access.</div>
             </div>
-          )}
+            <a href="/profile" className="text-xs text-amber-800 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg font-medium">Complete →</a>
+          </div>
+        )}
+
+        {/* Metrics */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          {[
+            { label: 'Active jobs',   value: String(activeJobs),                   sub: 'In progress' },
+            { label: 'Completed',     value: String(completedJobs),                sub: 'All time' },
+            { label: 'BUS grants',    value: `£${(busApproved * 7500).toLocaleString()}`, sub: `${busApproved} approved` },
+            { label: 'Total jobs',    value: String(jobs.length),                  sub: 'All time' },
+          ].map(m => (
+            <div key={m.label} className="bg-white border border-gray-200 rounded-xl p-4">
+              <div className="text-xs text-gray-400 font-medium uppercase tracking-wide mb-1">{m.label}</div>
+              <div className="text-2xl font-semibold text-gray-900">{m.value}</div>
+              <div className="text-xs text-gray-400 mt-1">{m.sub}</div>
+            </div>
+          ))}
         </div>
 
-        {/* MCS Document pack */}
-        <div className="bg-white border border-gray-200 rounded-xl p-6">
-          <div className="text-sm font-medium text-gray-900 mb-4">MCS document pack</div>
-          {documents.length === 0 ? (
-            <div className="text-xs text-gray-400">Documents will appear here as stages are completed.</div>
+        {/* Jobs table */}
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-3 flex-wrap">
+            <span className="text-sm font-medium text-gray-900">Jobs</span>
+            <input type="text" placeholder="Search..." value={search} onChange={e => setSearch(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-400 w-48"/>
+            <select value={stageFilter} onChange={e => setStageFilter(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none">
+              <option value="">All stages</option>
+              {STAGE_ORDER.map(s => <option key={s} value={s}>{STAGE_LABEL[s]}</option>)}
+            </select>
+            <div className="ml-auto">
+              <a href="/jobs/new" className="text-xs text-emerald-700 hover:underline">+ New job</a>
+            </div>
+          </div>
+
+          {filtered.length === 0 ? (
+            <div className="py-16 text-center">
+              <div className="text-3xl mb-3">📋</div>
+              <div className="text-sm font-medium text-gray-500 mb-1">No jobs yet</div>
+              <div className="text-xs text-gray-400 mb-4">{profilePct === 100 ? 'Create your first job to get started.' : 'Complete your profile first.'}</div>
+              {profilePct === 100 && <a href="/jobs/new" className="text-xs bg-emerald-700 text-white px-4 py-2 rounded-lg hover:bg-emerald-800">New job →</a>}
+            </div>
           ) : (
-            <div className="space-y-2">
-              {documents.map((doc: any) => (
-                <div key={doc.id} className="flex items-center justify-between py-3 border-b border-gray-50 last:border-0">
-                  <div className="flex items-center gap-3">
-                    <div className="w-7 h-7 bg-gray-50 border border-gray-200 rounded flex items-center justify-center flex-shrink-0">
-                      <svg width="12" height="14" viewBox="0 0 12 14" fill="none">
-                        <path d="M2 1h5l3 3v9H2V1z" stroke="#9ca3af" strokeWidth="1.2" fill="none"/>
-                        <path d="M7 1v3h3" stroke="#9ca3af" strokeWidth="1.2" fill="none"/>
-                      </svg>
-                    </div>
-                    <div>
-                      <div className="text-xs font-medium text-gray-900">{doc.doc_name}</div>
-                      <div className="text-xs text-gray-400">{doc.doc_ref}</div>
-                    </div>
-                  </div>
-                  <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${getDocStatusPill(doc.status)}`}>
-                    {doc.status?.replace('_', ' ')}
-                  </span>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px]">
+                <thead>
+                  <tr className="border-b border-gray-100">
+                    {['Customer', 'Address', 'Reference', 'Current stage', 'BUS', 'Updated'].map(h => (
+                      <th key={h} className="text-left text-xs font-medium text-gray-400 px-4 py-2.5 whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {filtered.slice(0, 25).map(job => {
+                    const c = job.customers
+                    const { stage, status } = getCurrentStage(job)
+                    const daysAgo = Math.floor((Date.now() - new Date(job.updated_at).getTime()) / 86400000)
+                    const updLabel = daysAgo === 0 ? 'Today' : daysAgo === 1 ? 'Yesterday' : `${daysAgo}d ago`
+                    const stagePill = status === 'in_progress' ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                      : status === 'complete' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : 'bg-gray-50 text-gray-400 border border-gray-200'
+                    return (
+                      <tr key={job.id} onClick={() => router.push(`/jobs/${job.id}`)}
+                        className="hover:bg-gray-50 cursor-pointer transition-colors">
+                        <td className="px-4 py-3">
+                          <div className="text-sm font-medium text-gray-900">{c?.first_name} {c?.last_name}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="text-xs text-gray-500">{c?.address_line1}</div>
+                          <div className="text-xs text-gray-400">{c?.postcode}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="text-xs font-mono text-gray-400">{job.reference || '—'}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium whitespace-nowrap ${stagePill}`}>
+                            {STAGE_LABEL[stage] || stage}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {job.bus_eligible ? (
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${BUS_COLORS[job.bus_status] || BUS_COLORS.not_started}`}>
+                              {(job.bus_status || 'eligible').replace('_', ' ')}
+                            </span>
+                          ) : <span className="text-xs text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="text-xs text-gray-400">{updLabel}</span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              {filtered.length > 25 && (
+                <div className="px-4 py-3 text-xs text-gray-400 border-t border-gray-100 text-center">
+                  Showing 25 of {filtered.length} · <a href="/jobs" className="text-emerald-700 hover:underline">View all</a>
                 </div>
-              ))}
+              )}
             </div>
           )}
         </div>

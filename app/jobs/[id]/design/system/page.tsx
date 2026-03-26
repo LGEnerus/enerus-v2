@@ -184,10 +184,10 @@ export default function EmitterSpecPage() {
   const spf = getSPF(flowTemp)
   const annualHeat = totalHeatLossW > 0 ? Math.round((totalHeatLossW / ((21 - designTempExt) * 1000)) * 2200 * 24) : 0
   const annualElec = annualHeat > 0 ? Math.round(annualHeat / spf) : 0
-  const floors = [...new Set(rooms.map(r => r.floor))].sort((a, b) => a - b)
+  const floors = Array.from(new Set(rooms.map(r => r.floor))).sort((a, b) => a - b)
 
-  const heights = [...new Set(ULTRAHEAT_RADIATORS.map(r => r.height_mm))].sort((a, b) => a - b)
-  const types = [...new Set(ULTRAHEAT_RADIATORS.map(r => r.type))]
+  const heights = Array.from(new Set(ULTRAHEAT_RADIATORS.map(r => r.height_mm))).sort((a, b) => a - b)
+  const types = Array.from(new Set(ULTRAHEAT_RADIATORS.map(r => r.type)))
   const filteredRads = ULTRAHEAT_RADIATORS.filter(r =>
     (!radFilter.height || r.height_mm === parseInt(radFilter.height)) &&
     (!radFilter.type || r.type === radFilter.type)
