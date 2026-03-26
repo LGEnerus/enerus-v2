@@ -51,7 +51,7 @@ function DashboardInner() {
     return s.find(x => x.status === 'in_progress') || [...s].reverse().find(x => x.status === 'complete') || { stage: 'customer', status: 'locked' }
   }
 
-  const profileFields = [profile?.company_name, profile?.address_line1, profile?.postcode, profile?.phone, profile?.email, profile?.mcs_certificate_number, profile?.public_liability_insurer, profile?.logo_url]
+  const profileFields = [profile?.company_name, profile?.address_line1, profile?.postcode, profile?.phone, user?.email, profile?.mcs_certificate_number, profile?.public_liability_insurer, profile?.logo_url]
   const profilePct = Math.round((profileFields.filter(Boolean).length / profileFields.length) * 100)
   const mcsExpiry = profile?.mcs_expiry_date
   const mcsDaysLeft = mcsExpiry ? Math.floor((new Date(mcsExpiry).getTime() - Date.now()) / 86400000) : null
