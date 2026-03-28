@@ -4,232 +4,268 @@
 
 import { useEffect, useState, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { supabase } from '@/lib/supabase'
-
-const STAGE_ORDER = [
-  'customer','survey','design','proposal','acceptance',
-  'bus_application','materials','installation','commissioning','handover'
-]
-const STAGE_LABEL: Record<string,string> = {
-  customer:'Customer', survey:'Survey', design:'Design', proposal:'Proposal',
-  acceptance:'Acceptance', bus_application:'BUS', materials:'Materials',
-  installation:'Installation', commissioning:'Commissioning', handover:'Handover',
-}
-const BUS_COLORS: Record<string,string> = {
-  not_started:'bg-gray-100 text-gray-400', eligible:'bg-blue-100 text-blue-700',
-  submitted:'bg-amber-100 text-amber-700', approved:'bg-emerald-100 text-emerald-700',
-  redeemed:'bg-emerald-700 text-white', rejected:'bg-red-100 text-red-700',
-}
+import { supabase, formatCurrency, formatDate, isQuote, isJob, isInvoice } from '@/lib/supabase'
 
 function DashboardInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const isWelcome = searchParams.get('welcome') === '1'
+
+  const [account, setAccount] = useState<any>(null)
   const [user, setUser] = useState<any>(null)
-  const [profile, setProfile] = useState<any>(null)
-  const [jobs, setJobs] = useState<any[]>([])
+  const [works, setWorks] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [stageFilter, setStageFilter] = useState('')
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => { load() }, [])
 
-  async function loadData() {
+  async function load() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) { router.push('/login'); return }
-    const [{ data: u }, { data: ip }] = await Promise.all([
-      (supabase as any).from('users').select('*').eq('id', session.user.id).single(),
-      (supabase as any).from('installer_profiles').select('*').eq('user_id', session.user.id).single(),
-    ])
-    setUser(u); setProfile(ip)
 
-    // installer_id on jobs = installer_profiles.id (not auth user.id)
-    const profileId = ip?.id
-    if (profileId) {
-      const { data: jd } = await (supabase as any)
-        .from('jobs')
-        .select('id,reference,bus_status,bus_eligible,created_at,updated_at,customers(first_name,last_name,address_line1,postcode),job_stages(stage,status)')
-        .eq('installer_id', profileId)
-        .order('updated_at', { ascending: false })
-      setJobs(jd || [])
-    }
+    const { data: u } = await (supabase as any)
+      .from('users').select('*, accounts(*)').eq('id', session.user.id).single()
+
+    if (!u?.account_id) { router.push('/onboarding'); return }
+
+    setUser(u)
+    setAccount(u.accounts)
+
+    const { data: w } = await (supabase as any)
+      .from('works')
+      .select('*, customers(first_name, last_name, company_name, is_company, postcode)')
+      .order('updated_at', { ascending: false })
+      .limit(50)
+
+    setWorks(w || [])
     setLoading(false)
   }
 
-  function getCurrentStage(job: any) {
-    const s: any[] = job.job_stages || []
-    return s.find(x => x.status === 'in_progress') || [...s].reverse().find(x => x.status === 'complete') || { stage: 'customer', status: 'locked' }
-  }
+  // Metrics
+  const activeJobs = works.filter(w => w.status === 'job_in_progress' || w.status === 'job_scheduled').length
+  const openQuotes = works.filter(w => isQuote(w.status) && w.status !== 'quote_declined' && w.status !== 'archived')
+  const openQuoteValue = openQuotes.reduce((s, w) => s + (w.total_gross || 0), 0)
+  const overdueInvoices = works.filter(w => w.status === 'invoice_overdue')
+  const overdueValue = overdueInvoices.reduce((s, w) => s + (w.amount_due || 0), 0)
+  const paidThisMonth = works.filter(w => {
+    if (w.status !== 'invoice_paid') return false
+    const d = new Date(w.updated_at)
+    const now = new Date()
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+  }).reduce((s, w) => s + (w.total_gross || 0), 0)
 
-  const profileFields = [profile?.company_name, profile?.address_line1, profile?.postcode, profile?.phone, user?.email, profile?.mcs_certificate_number, profile?.public_liability_insurer, profile?.logo_url]
-  const profilePct = Math.round((profileFields.filter(Boolean).length / profileFields.length) * 100)
-  const mcsExpiry = profile?.mcs_expiry_date
-  const mcsDaysLeft = mcsExpiry ? Math.floor((new Date(mcsExpiry).getTime() - Date.now()) / 86400000) : null
-  const activeJobs = jobs.filter(j => getCurrentStage(j).status === 'in_progress').length
-  const completedJobs = jobs.filter(j => getCurrentStage(j).stage === 'handover' && getCurrentStage(j).status === 'complete').length
-  const busApproved = jobs.filter(j => j.bus_status === 'approved' || j.bus_status === 'redeemed').length
-
-  const filtered = jobs.filter(j => {
-    const c = j.customers
-    const name = `${c?.first_name} ${c?.last_name} ${c?.address_line1} ${c?.postcode}`.toLowerCase()
-    const { stage } = getCurrentStage(j)
-    return (!search || name.includes(search.toLowerCase())) && (!stageFilter || stage === stageFilter)
+  // Filtered recent works
+  const filtered = works.filter(w => {
+    if (!search) return true
+    const c = w.customers
+    const name = `${c?.first_name || ''} ${c?.last_name || ''} ${c?.company_name || ''} ${w.reference || ''}`.toLowerCase()
+    return name.includes(search.toLowerCase())
   })
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center"><p className="text-sm text-gray-400">Loading...</p></div>
+  function customerName(w: any) {
+    const c = w.customers
+    if (!c) return '—'
+    if (c.is_company && c.company_name) return c.company_name
+    return `${c.first_name} ${c.last_name}`
+  }
+
+  const statusColour: Record<string, string> = {
+    draft: 'text-gray-500 bg-gray-800',
+    quote_sent: 'text-blue-300 bg-blue-900/50',
+    quote_viewed: 'text-blue-200 bg-blue-800/50',
+    quote_accepted: 'text-amber-300 bg-amber-900/50',
+    quote_declined: 'text-gray-500 bg-gray-800',
+    job_scheduled: 'text-purple-300 bg-purple-900/50',
+    job_in_progress: 'text-amber-300 bg-amber-900/50',
+    job_complete: 'text-emerald-300 bg-emerald-900/50',
+    invoice_sent: 'text-blue-300 bg-blue-900/50',
+    invoice_viewed: 'text-blue-200 bg-blue-800/50',
+    invoice_partially_paid: 'text-amber-300 bg-amber-900/50',
+    invoice_paid: 'text-emerald-300 bg-emerald-900/50',
+    invoice_overdue: 'text-red-300 bg-red-900/50',
+    cancelled: 'text-gray-600 bg-gray-800',
+    archived: 'text-gray-700 bg-gray-900',
+  }
+
+  const statusLabel: Record<string, string> = {
+    draft: 'Draft', quote_sent: 'Quote sent', quote_viewed: 'Viewed',
+    quote_accepted: 'Accepted', quote_declined: 'Declined',
+    job_scheduled: 'Scheduled', job_in_progress: 'In progress', job_complete: 'Complete',
+    invoice_sent: 'Invoice sent', invoice_viewed: 'Invoice viewed',
+    invoice_partially_paid: 'Part paid', invoice_paid: 'Paid',
+    invoice_overdue: 'Overdue', cancelled: 'Cancelled', archived: 'Archived',
+  }
+
+  if (loading) return (
+    <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+      <div className="text-sm text-gray-600">Loading…</div>
+    </div>
+  )
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Top bar */}
-      <div className="bg-white border-b border-gray-200 px-6 h-14 flex items-center justify-between sticky top-0 z-20">
-        <div className="flex items-center gap-3">
-          <span className="text-sm font-semibold text-gray-900">Dashboard</span>
-          {mcsDaysLeft !== null && mcsDaysLeft <= 60 && (
-            <a href="/profile" className={`text-xs px-2.5 py-1 rounded-full font-medium ${mcsDaysLeft <= 14 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
-              ⚠ MCS expires in {mcsDaysLeft}d
-            </a>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-500 hidden sm:block">{user?.full_name}</span>
-          <button onClick={async () => { await supabase.auth.signOut(); router.push('/login') }}
-            className="text-xs text-gray-400 hover:text-gray-600">Sign out</button>
-          <a href="/jobs/new" className={`text-xs font-medium px-4 py-1.5 rounded-lg transition-colors ${profilePct === 100 ? 'bg-emerald-700 text-white hover:bg-emerald-800' : 'bg-gray-100 text-gray-400 pointer-events-none'}`}>
-            + New job
-          </a>
-        </div>
-      </div>
+    <div className="min-h-screen bg-gray-950">
 
-      <div className="px-6 py-6">
 
-        {/* Banners */}
+      <div className="px-6 py-6 space-y-5 max-w-screen-2xl mx-auto">
+
+        {/* Welcome banner */}
         {isWelcome && (
-          <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-5 py-3 mb-5 flex items-center gap-3">
-            <span className="text-xl">🎉</span>
-            <div className="flex-1">
-              <div className="text-sm font-semibold text-emerald-900">Welcome to Enerus Plus</div>
-              <div className="text-xs text-emerald-700 mt-0.5">Complete your profile to unlock all features.</div>
+          <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4 flex items-center gap-4">
+            <div className="w-10 h-10 bg-amber-500/20 rounded-xl flex items-center justify-center flex-shrink-0">
+              <svg width="20" height="20" viewBox="0 0 16 16" fill="#f59e0b">
+                <path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z"/>
+              </svg>
             </div>
-            <a href="/profile" className="text-xs text-emerald-700 border border-emerald-300 px-3 py-1.5 rounded-lg hover:bg-emerald-100">Complete profile →</a>
+            <div className="flex-1">
+              <div className="text-sm font-bold text-amber-300">Welcome to TradeStack, {user?.full_name?.split(' ')[0] || 'there'}</div>
+              <div className="text-xs text-amber-500/70 mt-0.5">Your account is set up. Create your first quote or job to get started.</div>
+            </div>
+            <a href="/works/new" className="text-xs text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-lg hover:bg-amber-500/10 transition-colors flex-shrink-0">
+              Create first job →
+            </a>
           </div>
         )}
-        {profilePct < 100 && !isWelcome && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-3 mb-5 flex items-center gap-3">
-            <div className="flex-1">
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-medium text-amber-900">Profile {profilePct}% complete</span>
-                <div className="flex-1 max-w-28 bg-amber-200 rounded-full h-1.5"><div className="bg-amber-600 h-1.5 rounded-full" style={{ width: `${profilePct}%` }}/></div>
-              </div>
-              <div className="text-xs text-amber-700 mt-0.5">Add MCS number, insurance and branding to unlock full platform access.</div>
+
+        {/* Overdue alert */}
+        {overdueInvoices.length > 0 && (
+          <div className="bg-red-500/8 border border-red-500/20 rounded-2xl px-5 py-3 flex items-center gap-3">
+            <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0"/>
+            <div className="flex-1 text-sm text-red-300">
+              {overdueInvoices.length} overdue invoice{overdueInvoices.length > 1 ? 's' : ''} — {formatCurrency(overdueValue)} outstanding
             </div>
-            <a href="/profile" className="text-xs text-amber-800 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg font-medium">Complete →</a>
+            <a href="/works?view=invoices&status=invoice_overdue" className="text-xs text-red-400 font-medium hover:text-red-300 flex-shrink-0">
+              View →
+            </a>
           </div>
         )}
 
         {/* Metrics */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: 'Active jobs',   value: String(activeJobs),                   sub: 'In progress' },
-            { label: 'Completed',     value: String(completedJobs),                sub: 'All time' },
-            { label: 'BUS grants',    value: `£${(busApproved * 7500).toLocaleString()}`, sub: `${busApproved} approved` },
-            { label: 'Total jobs',    value: String(jobs.length),                  sub: 'All time' },
+            { label: 'Revenue this month', value: formatCurrency(paidThisMonth), sub: 'Paid invoices', colour: 'text-amber-400', positive: paidThisMonth > 0 },
+            { label: 'Overdue', value: formatCurrency(overdueValue), sub: `${overdueInvoices.length} invoice${overdueInvoices.length !== 1 ? 's' : ''}`, colour: overdueValue > 0 ? 'text-red-400' : 'text-gray-500', positive: false },
+            { label: 'Open quotes', value: formatCurrency(openQuoteValue), sub: `${openQuotes.length} awaiting response`, colour: 'text-blue-400', positive: openQuotes.length > 0 },
+            { label: 'Active jobs', value: String(activeJobs), sub: 'In progress + scheduled', colour: 'text-emerald-400', positive: activeJobs > 0 },
           ].map(m => (
-            <div key={m.label} className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="text-xs text-gray-400 font-medium uppercase tracking-wide mb-1">{m.label}</div>
-              <div className="text-2xl font-semibold text-gray-900">{m.value}</div>
-              <div className="text-xs text-gray-400 mt-1">{m.sub}</div>
+            <div key={m.label} className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+              <div className="text-xs text-gray-600 uppercase tracking-wide mb-2">{m.label}</div>
+              <div className={`text-2xl font-bold ${m.colour}`}>{m.value}</div>
+              <div className="text-xs text-gray-600 mt-1.5">{m.sub}</div>
             </div>
           ))}
         </div>
 
-        {/* Jobs table */}
-        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-3 flex-wrap">
-            <span className="text-sm font-medium text-gray-900">Jobs</span>
-            <input type="text" placeholder="Search..." value={search} onChange={e => setSearch(e.target.value)}
-              className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-400 w-48"/>
-            <select value={stageFilter} onChange={e => setStageFilter(e.target.value)}
-              className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none">
-              <option value="">All stages</option>
-              {STAGE_ORDER.map(s => <option key={s} value={s}>{STAGE_LABEL[s]}</option>)}
-            </select>
-            <div className="ml-auto">
-              <a href="/jobs/new" className="text-xs text-emerald-700 hover:underline">+ New job</a>
+        {/* Works table */}
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-800 flex items-center gap-3 flex-wrap">
+            <span className="text-sm font-semibold text-white">Recent work</span>
+            <div className="relative flex-1 max-w-xs">
+              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-600" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clipRule="evenodd"/>
+              </svg>
+              <input type="text" placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded-xl pl-9 pr-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-amber-500"/>
             </div>
+            <a href="/works" className="text-xs text-amber-400 hover:text-amber-300 ml-auto">View all →</a>
           </div>
 
           {filtered.length === 0 ? (
-            <div className="py-16 text-center">
-              <div className="text-3xl mb-3">📋</div>
-              <div className="text-sm font-medium text-gray-500 mb-1">No jobs yet</div>
-              <div className="text-xs text-gray-400 mb-4">{profilePct === 100 ? 'Create your first job to get started.' : 'Complete your profile first.'}</div>
-              {profilePct === 100 && <a href="/jobs/new" className="text-xs bg-emerald-700 text-white px-4 py-2 rounded-lg hover:bg-emerald-800">New job →</a>}
+            <div className="py-20 text-center">
+              <div className="text-4xl mb-4 opacity-10">📋</div>
+              <div className="text-sm font-medium text-gray-600 mb-1">No work yet</div>
+              <div className="text-xs text-gray-700 mb-5">Create your first quote or job to get started</div>
+              <a href="/works/new" className="text-xs bg-amber-500 text-gray-950 font-bold px-5 py-2.5 rounded-xl hover:bg-amber-400 transition-colors">
+                + New job or quote
+              </a>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[640px]">
                 <thead>
-                  <tr className="border-b border-gray-100">
-                    {['Customer', 'Address', 'Reference', 'Current stage', 'BUS', 'Updated'].map(h => (
-                      <th key={h} className="text-left text-xs font-medium text-gray-400 px-4 py-2.5 whitespace-nowrap">{h}</th>
+                  <tr className="border-b border-gray-800">
+                    {['Ref', 'Customer', 'Type', 'Status', 'Value', 'Updated'].map(h => (
+                      <th key={h} className="text-left text-xs font-medium text-gray-600 px-4 py-3">{h}</th>
                     ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {filtered.slice(0, 25).map(job => {
-                    const c = job.customers
-                    const { stage, status } = getCurrentStage(job)
-                    const daysAgo = Math.floor((Date.now() - new Date(job.updated_at).getTime()) / 86400000)
+                <tbody>
+                  {filtered.slice(0, 20).map(w => {
+                    const daysAgo = Math.floor((Date.now() - new Date(w.updated_at).getTime()) / 86400000)
                     const updLabel = daysAgo === 0 ? 'Today' : daysAgo === 1 ? 'Yesterday' : `${daysAgo}d ago`
-                    const stagePill = status === 'in_progress' ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                      : status === 'complete' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      : 'bg-gray-50 text-gray-400 border border-gray-200'
+                    const type = isQuote(w.status) ? 'Quote' : isJob(w.status) ? 'Job' : isInvoice(w.status) ? 'Invoice' : '—'
                     return (
-                      <tr key={job.id} onClick={() => router.push(`/jobs/${job.id}`)}
-                        className="hover:bg-gray-50 cursor-pointer transition-colors">
+                      <tr key={w.id}
+                        onClick={() => router.push(`/works/${w.id}`)}
+                        className="border-b border-gray-800/50 hover:bg-gray-800/40 cursor-pointer transition-colors group">
                         <td className="px-4 py-3">
-                          <div className="text-sm font-medium text-gray-900">{c?.first_name} {c?.last_name}</div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="text-xs text-gray-500">{c?.address_line1}</div>
-                          <div className="text-xs text-gray-400">{c?.postcode}</div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="text-xs font-mono text-gray-400">{job.reference || '—'}</span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium whitespace-nowrap ${stagePill}`}>
-                            {STAGE_LABEL[stage] || stage}
+                          <span className="text-xs font-mono text-gray-500 group-hover:text-amber-400 transition-colors">
+                            {w.reference || '—'}
                           </span>
                         </td>
                         <td className="px-4 py-3">
-                          {job.bus_eligible ? (
-                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${BUS_COLORS[job.bus_status] || BUS_COLORS.not_started}`}>
-                              {(job.bus_status || 'eligible').replace('_', ' ')}
-                            </span>
-                          ) : <span className="text-xs text-gray-300">—</span>}
+                          <div className="text-sm font-medium text-gray-200">{customerName(w)}</div>
+                          <div className="text-xs text-gray-600">{w.customers?.postcode}</div>
                         </td>
                         <td className="px-4 py-3">
-                          <span className="text-xs text-gray-400">{updLabel}</span>
+                          <span className="text-xs text-gray-500">{type}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${statusColour[w.status] || 'text-gray-500 bg-gray-800'}`}>
+                            {statusLabel[w.status] || w.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className={`text-sm font-semibold ${w.status === 'invoice_overdue' ? 'text-red-400' : 'text-gray-200'}`}>
+                            {formatCurrency(w.total_gross || 0)}
+                          </div>
+                          {w.amount_due > 0 && w.amount_due < w.total_gross && (
+                            <div className="text-xs text-amber-400">{formatCurrency(w.amount_due)} due</div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="text-xs text-gray-600">{updLabel}</span>
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-              {filtered.length > 25 && (
-                <div className="px-4 py-3 text-xs text-gray-400 border-t border-gray-100 text-center">
-                  Showing 25 of {filtered.length} · <a href="/jobs" className="text-emerald-700 hover:underline">View all</a>
+              {filtered.length > 20 && (
+                <div className="px-4 py-3 text-center border-t border-gray-800">
+                  <a href="/works" className="text-xs text-amber-400 hover:text-amber-300">
+                    View all {filtered.length} records →
+                  </a>
                 </div>
               )}
             </div>
           )}
         </div>
+
+        {/* Quick actions */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            { label: 'New quote', href: '/works/new?type=quote', icon: '📄' },
+            { label: 'New job', href: '/works/new?type=job', icon: '🔧' },
+            { label: 'New invoice', href: '/works/new?type=invoice', icon: '💰' },
+            { label: 'All work', href: '/works', icon: '📋' },
+          ].map(a => (
+            <a key={a.label} href={a.href}
+              className="bg-gray-900 border border-gray-800 hover:border-amber-500/30 rounded-2xl p-4 flex items-center gap-3 transition-colors group">
+              <span className="text-xl">{a.icon}</span>
+              <span className="text-sm font-medium text-gray-400 group-hover:text-white transition-colors">{a.label}</span>
+            </a>
+          ))}
+        </div>
+
       </div>
     </div>
   )
 }
 
 export default function DashboardPage() {
-  return <Suspense fallback={<div className="min-h-screen flex items-center justify-center"><p className="text-sm text-gray-400">Loading...</p></div>}><DashboardInner /></Suspense>
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-950 flex items-center justify-center"><div className="text-sm text-gray-600">Loading…</div></div>}>
+      <DashboardInner/>
+    </Suspense>
+  )
 }
