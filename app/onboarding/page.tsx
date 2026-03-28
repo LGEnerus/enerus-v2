@@ -129,17 +129,13 @@ export default function OnboardingPage() {
       <div className="w-full max-w-xl">
 
         {/* Logo */}
-        <div className="flex items-center gap-3 mb-8">
-          <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="#0f1117">
-              <path d="M10 2L4 5.5v5c0 3.5 2.5 6.8 6 7.5 3.5-.7 6-4 6-7.5v-5L10 2z"/>
-            </svg>
-          </div>
-          <div>
-            <div className="text-base font-bold text-white">trade stack</div>
-            <div className="text-xs text-gray-500">set up your account</div>
-          </div>
-        </div>
+
+<div className="flex items-center justify-center mb-8">
+  <svg viewBox="0 0 200 46" width="200" height="46" xmlns="http://www.w3.org/2000/svg">
+    <text x="0" y="34" fontFamily="system-ui, -apple-system, sans-serif" fontSize="34" fontWeight="800" fill="#9ca3af" letterSpacing="-0.5">trade stack</text>
+    <text x="124" y="44" fontFamily="system-ui, -apple-system, sans-serif" fontSize="11" fontWeight="400" fill="#4b5563" letterSpacing="0.2">by enerus</text>
+  </svg>
+</div>
 
         {/* Step indicator */}
         <div className="flex items-center gap-2 mb-8">
