@@ -27,7 +27,8 @@ function DashboardInner() {
     const { data: u } = await (supabase as any)
       .from('users').select('*, accounts(*)').eq('id', session.user.id).single()
 
-    if (!u?.account_id) { router.push('/onboarding'); return }
+    // Only redirect to onboarding if we got a clean null — not a cache error
+    if (u !== null && !u?.account_id) { router.push('/onboarding'); return }
 
     setUser(u)
     setAccount(u.accounts)

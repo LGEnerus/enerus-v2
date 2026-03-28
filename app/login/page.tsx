@@ -24,18 +24,31 @@ export default function LoginPage() {
     }
 
     if (data.session) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: userData } = await (supabase as any)
-        .from('users')
-        .select('role, account_id')
-        .eq('id', data.user.id)
-        .single()
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: userData, error: userError } = await (supabase as any)
+          .from('users')
+          .select('role, account_id')
+          .eq('id', data.user.id)
+          .single()
 
-      if (!userData?.account_id) {
-        window.location.replace('/onboarding')
-      } else if (userData?.role === 'admin') {
-        window.location.replace('/admin')
-      } else {
+        if (userError || !userData) {
+          // Schema cache issue or new user - check if they have a session
+          // and route to dashboard optimistically, onboarding will catch them
+          // if account setup is incomplete
+          window.location.replace('/dashboard')
+          return
+        }
+
+        if (!userData.account_id) {
+          window.location.replace('/onboarding')
+        } else if (userData.role === 'admin') {
+          window.location.replace('/admin')
+        } else {
+          window.location.replace('/dashboard')
+        }
+      } catch {
+        // If user lookup fails, go to dashboard — middleware will redirect if needed
         window.location.replace('/dashboard')
       }
     }
