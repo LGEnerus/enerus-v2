@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation'
 import Sidebar from './Sidebar'
 
 // Pages that should NOT have the sidebar
-const PUBLIC_PATHS = ['/login', '/register', '/onboarding', '/accept']
+const PUBLIC_PATHS = ['/login', '/register', '/onboarding', '/accept', '/portal']
 
 export default function ConditionalLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()

@@ -4,7 +4,7 @@
 
 import { useEffect, useState, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { supabase, formatCurrency, formatDate, isQuote, isJob, isInvoice } from '@/lib/supabase'
+import { supabase, formatCurrency, formatDate, isQuote, isJob, isInvoice, daysUntil } from '@/lib/supabase'
 
 function DashboardInner() {
   const router = useRouter()
@@ -16,6 +16,7 @@ function DashboardInner() {
   const [works, setWorks] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [compliance, setCompliance] = useState<any[]>([])
 
   useEffect(() => { load() }, [])
 
@@ -38,6 +39,18 @@ function DashboardInner() {
       .limit(50)
 
     setWorks(w || [])
+
+    // Load compliance records expiring in next 60 days
+    const soon = new Date()
+    soon.setDate(soon.getDate() + 60)
+    const { data: comp } = await (supabase as any)
+      .from('compliance_records')
+      .select('id, name, type, expiry_date')
+      .eq('is_active', true)
+      .lte('expiry_date', soon.toISOString().split('T')[0])
+      .order('expiry_date', { ascending: true })
+    setCompliance(comp || [])
+
     setLoading(false)
   }
 
@@ -126,23 +139,51 @@ function DashboardInner() {
           </div>
         )}
 
-        {/* Overdue alert */}
+        {/* Overdue invoices alert */}
         {overdueInvoices.length > 0 && (
           <div className="bg-red-500/8 border border-red-500/20 rounded-2xl px-5 py-3 flex items-center gap-3">
             <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0"/>
             <div className="flex-1 text-sm text-red-300">
               {overdueInvoices.length} overdue invoice{overdueInvoices.length > 1 ? 's' : ''} — {formatCurrency(overdueValue)} outstanding
             </div>
-            <a href="/works?view=invoices&status=invoice_overdue" className="text-xs text-red-400 font-medium hover:text-red-300 flex-shrink-0">
-              View →
-            </a>
+            <a href="/works" className="text-xs text-red-400 font-medium hover:text-red-300 flex-shrink-0">View →</a>
+          </div>
+        )}
+
+        {/* Compliance expiry alerts */}
+        {compliance.length > 0 && (
+          <div className="space-y-2">
+            {compliance.map(c => {
+              const days = daysUntil(c.expiry_date)
+              const expired = days !== null && days < 0
+              const urgent = days !== null && days <= 14
+              return (
+                <div key={c.id} className={`border rounded-2xl px-5 py-3 flex items-center gap-3 ${
+                  expired ? 'bg-red-500/8 border-red-500/20' :
+                  urgent  ? 'bg-red-500/5 border-red-500/15' :
+                            'bg-amber-500/5 border-amber-500/15'
+                }`}>
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${expired || urgent ? 'bg-red-500' : 'bg-amber-500'}`}/>
+                  <div className="flex-1 text-sm">
+                    <span className={expired || urgent ? 'text-red-300' : 'text-amber-300'}>
+                      {expired
+                        ? `${c.name} expired ${Math.abs(days!)}d ago`
+                        : `${c.name} expires in ${days}d`}
+                    </span>
+                  </div>
+                  <a href="/compliance" className={`text-xs font-medium flex-shrink-0 ${expired || urgent ? 'text-red-400 hover:text-red-300' : 'text-amber-400 hover:text-amber-300'}`}>
+                    Renew →
+                  </a>
+                </div>
+              )
+            })}
           </div>
         )}
 
         {/* Metrics */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: 'Revenue this month', value: formatCurrency(paidThisMonth), sub: 'Paid invoices', colour: 'text-amber-400', positive: paidThisMonth > 0 },
+            { label: `Revenue — ${new Date().toLocaleDateString('en-GB', { month: 'long' })}`, value: formatCurrency(paidThisMonth), sub: 'Paid invoices', colour: 'text-amber-400', positive: paidThisMonth > 0 },
             { label: 'Overdue', value: formatCurrency(overdueValue), sub: `${overdueInvoices.length} invoice${overdueInvoices.length !== 1 ? 's' : ''}`, colour: overdueValue > 0 ? 'text-red-400' : 'text-gray-500', positive: false },
             { label: 'Open quotes', value: formatCurrency(openQuoteValue), sub: `${openQuotes.length} awaiting response`, colour: 'text-blue-400', positive: openQuotes.length > 0 },
             { label: 'Active jobs', value: String(activeJobs), sub: 'In progress + scheduled', colour: 'text-emerald-400', positive: activeJobs > 0 },
