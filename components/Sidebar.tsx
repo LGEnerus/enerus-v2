@@ -183,9 +183,9 @@ export default function Sidebar() {
 
         {/* Brand logo */}
         <div className="px-3 py-4 mt-1 border-t border-gray-800">
-          <svg viewBox="0 0 175 38" width="155" height="34" xmlns="http://www.w3.org/2000/svg">
+          <svg viewBox="0 0 175 42" width="155" height="38" xmlns="http://www.w3.org/2000/svg">
             <text x="0" y="26" fontFamily="system-ui, -apple-system, sans-serif" fontSize="26" fontWeight="800" fill="#9ca3af" letterSpacing="-0.5">trade stack</text>
-            <text x="108" y="35" fontFamily="system-ui, -apple-system, sans-serif" fontSize="9" fontWeight="400" fill="#4b5563" letterSpacing="0.2">by enerus</text>
+            <text x="173" y="38" textAnchor="end" fontFamily="system-ui, -apple-system, sans-serif" fontSize="10" fontWeight="400" fill="#4b5563" letterSpacing="0.3">by enerus</text>
           </svg>
         </div>
       </div>

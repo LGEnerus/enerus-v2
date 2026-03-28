@@ -151,6 +151,25 @@ function DashboardInner() {
           </div>
         )}
 
+        {/* Trial banner */}
+        {account?.status === 'trial' && account?.trial_ends_at && (() => {
+          const days = Math.ceil((new Date(account.trial_ends_at).getTime() - Date.now()) / 86400000)
+          if (days > 14) return null
+          return (
+            <div className={`border rounded-2xl px-5 py-3 flex items-center gap-3 ${days <= 3 ? 'bg-red-500/8 border-red-500/20' : 'bg-amber-500/8 border-amber-500/20'}`}>
+              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${days <= 3 ? 'bg-red-500' : 'bg-amber-500'}`}/>
+              <div className="flex-1 text-sm">
+                <span className={days <= 3 ? 'text-red-300' : 'text-amber-300'}>
+                  {days <= 0 ? 'Your free trial has ended' : `${days} day${days === 1 ? '' : 's'} left on your free trial`}
+                </span>
+              </div>
+              <a href="/pricing" className={`text-xs font-bold flex-shrink-0 px-3 py-1.5 rounded-lg ${days <= 3 ? 'bg-red-500 text-white hover:bg-red-400' : 'bg-amber-500 text-gray-950 hover:bg-amber-400'}`}>
+                Upgrade →
+              </a>
+            </div>
+          )
+        })()}
+
         {/* Compliance expiry alerts */}
         {compliance.length > 0 && (
           <div className="space-y-2">

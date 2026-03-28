@@ -371,9 +371,14 @@ export default function SettingsPage() {
               <div className="text-sm font-semibold text-white">Subscription</div>
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="text-sm text-gray-200 capitalize">{account?.plan || 'Solo'} plan</div>
-                  <div className="text-xs text-gray-600 mt-0.5">
-                    {account?.status === 'trial' ? `Trial ends ${new Date(account.trial_ends_at).toLocaleDateString('en-GB')}` : account?.status}
+                  <div className="text-sm text-gray-200 capitalize font-medium">{account?.plan || 'Basic'} plan</div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {account?.status === 'trial'
+                      ? `Free trial · expires ${account.trial_ends_at ? new Date(account.trial_ends_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' }) : '—'}`
+                      : account?.status === 'active' ? `Active · £${account?.plan === 'business' ? '30' : account?.plan === 'team' ? '20' : '15'}/month`
+                      : account?.status === 'past_due' ? 'Payment overdue'
+                      : account?.status === 'cancelled' ? 'Cancelled'
+                      : account?.status}
                   </div>
                 </div>
                 <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${
@@ -381,6 +386,24 @@ export default function SettingsPage() {
                   account?.status === 'trial' ? 'bg-amber-900/50 text-amber-300' :
                   'bg-red-900/50 text-red-300'
                 }`}>{account?.status}</span>
+              </div>
+              <div className="flex gap-2 pt-1">
+                {(account?.status === 'trial' || account?.status === 'cancelled' || account?.status === 'past_due') && (
+                  <a href="/pricing" className="flex-1 text-center text-xs bg-amber-500 hover:bg-amber-400 text-gray-950 font-bold py-2.5 rounded-xl transition-colors">
+                    {account?.status === 'trial' ? 'Upgrade now' : 'Resubscribe'}
+                  </a>
+                )}
+                {account?.status === 'active' && account?.plan === 'solo' && (
+                  <a href="/pricing" className="flex-1 text-center text-xs bg-amber-500 hover:bg-amber-400 text-gray-950 font-bold py-2.5 rounded-xl transition-colors">
+                    Upgrade to Premium
+                  </a>
+                )}
+                {account?.status === 'active' && (
+                  <a href="https://billing.stripe.com/p/login/test_00g00000000" target="_blank"
+                    className="flex-1 text-center text-xs border border-gray-700 text-gray-400 hover:bg-gray-800 py-2.5 rounded-xl transition-colors">
+                    Manage billing
+                  </a>
+                )}
               </div>
             </div>
 

@@ -88,6 +88,9 @@ export default function OnboardingPage() {
           invoice_payment_terms: form.invoice_payment_terms,
           primary_colour: '#f59e0b',
           secondary_colour: '#0f1117',
+          plan: 'solo',
+          status: 'trial',
+          trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
         })
         .select()
         .single()
@@ -130,10 +133,10 @@ export default function OnboardingPage() {
 
         {/* Logo */}
 
-<div className="flex items-center justify-center mb-8">
+<div className="flex items-center justify-center mb-10">
   <svg viewBox="0 0 200 46" width="200" height="46" xmlns="http://www.w3.org/2000/svg">
     <text x="0" y="34" fontFamily="system-ui, -apple-system, sans-serif" fontSize="34" fontWeight="800" fill="#9ca3af" letterSpacing="-0.5">trade stack</text>
-    <text x="124" y="44" fontFamily="system-ui, -apple-system, sans-serif" fontSize="11" fontWeight="400" fill="#4b5563" letterSpacing="0.2">by enerus</text>
+    <text x="198" y="44" textAnchor="end" fontFamily="system-ui, -apple-system, sans-serif" fontSize="11" fontWeight="400" fill="#4b5563" letterSpacing="0.3">by enerus</text>
   </svg>
 </div>
 
