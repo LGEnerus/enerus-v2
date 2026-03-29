@@ -209,9 +209,9 @@ function DashboardInner() {
             { label: 'Active jobs', value: String(activeJobs), sub: 'In progress + scheduled', colour: 'text-emerald-400', positive: activeJobs > 0 },
           ].map(m => (
             <div key={m.label} className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
-              <div className="text-xs text-gray-600 uppercase tracking-wide mb-2">{m.label}</div>
+              <div className="text-xs text-gray-400 uppercase tracking-wide mb-2">{m.label}</div>
               <div className={`text-2xl font-bold ${m.colour}`}>{m.value}</div>
-              <div className="text-xs text-gray-600 mt-1.5">{m.sub}</div>
+              <div className="text-xs text-gray-400 mt-1.5">{m.sub}</div>
             </div>
           ))}
         </div>
@@ -233,8 +233,8 @@ function DashboardInner() {
           {filtered.length === 0 ? (
             <div className="py-20 text-center">
               <div className="text-4xl mb-4 opacity-10">📋</div>
-              <div className="text-sm font-medium text-gray-600 mb-1">No work yet</div>
-              <div className="text-xs text-gray-700 mb-5">Create your first quote or job to get started</div>
+              <div className="text-sm font-medium text-gray-400 mb-1">No work yet</div>
+              <div className="text-xs text-gray-500 mb-5">Create your first quote or job to get started</div>
               <a href="/works/new" className="text-xs bg-amber-500 text-gray-950 font-bold px-5 py-2.5 rounded-xl hover:bg-amber-400 transition-colors">
                 + New job or quote
               </a>
@@ -245,7 +245,7 @@ function DashboardInner() {
                 <thead>
                   <tr className="border-b border-gray-800">
                     {['Ref', 'Customer', 'Type', 'Status', 'Value', 'Updated'].map(h => (
-                      <th key={h} className="text-left text-xs font-medium text-gray-600 px-4 py-3">{h}</th>
+                      <th key={h} className="text-left text-xs font-medium text-gray-400 px-4 py-3">{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -265,10 +265,10 @@ function DashboardInner() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="text-sm font-medium text-gray-200">{customerName(w)}</div>
-                          <div className="text-xs text-gray-600">{w.customers?.postcode}</div>
+                          <div className="text-xs text-gray-400">{w.customers?.postcode}</div>
                         </td>
                         <td className="px-4 py-3">
-                          <span className="text-xs text-gray-500">{type}</span>
+                          <span className="text-xs text-gray-400">{type}</span>
                         </td>
                         <td className="px-4 py-3">
                           <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${statusColour[w.status] || 'text-gray-500 bg-gray-800'}`}>
@@ -284,7 +284,7 @@ function DashboardInner() {
                           )}
                         </td>
                         <td className="px-4 py-3">
-                          <span className="text-xs text-gray-600">{updLabel}</span>
+                          <span className="text-xs text-gray-400">{updLabel}</span>
                         </td>
                       </tr>
                     )

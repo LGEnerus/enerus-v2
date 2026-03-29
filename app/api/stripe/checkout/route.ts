@@ -3,10 +3,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import Stripe from 'stripe'
 import { createClient } from '@supabase/supabase-js'
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2024-12-18.acacia',
-})
-
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -15,11 +11,16 @@ const supabase = createClient(
 // Stripe price IDs — create these in Stripe dashboard
 // Products: Basic (£15/mo) and Premium (£30/mo)
 const PRICE_IDS: Record<string, string> = {
-  basic:   process.env.STRIPE_PRICE_BASIC   || '',
-  premium: process.env.STRIPE_PRICE_PREMIUM || '',
+  solo:     process.env.STRIPE_PRICE_BASIC    || '',
+  team:     process.env.STRIPE_PRICE_TEAM     || '',
+  business: process.env.STRIPE_PRICE_PREMIUM  || '',
 }
 
 export async function POST(req: NextRequest) {
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
+    apiVersion: '2026-03-25.dahlia',
+  })
+
   try {
     const { plan } = await req.json()
 

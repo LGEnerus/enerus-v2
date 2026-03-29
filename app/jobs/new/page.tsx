@@ -2,825 +2,659 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useEffect, useState, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { supabase, VAT_RATE_PCT, formatCurrency, type VatRate, type TradeType } from '@/lib/supabase'
 
-type Step = 1 | 2 | 3 | 4
-
-type CustomerData = {
-  first_name: string
-  last_name: string
-  email: string
-  phone: string
-  address_line1: string
-  address_line2: string
-  city: string
-  postcode: string
+type LineItemDraft = {
+  id: string
+  name: string
+  description: string
+  quantity: number
+  unit: string
+  unit_price: number
+  cost_price: number
+  vat_rate: VatRate
+  is_material: boolean
 }
 
-type EpcData = {
-  lmk_key: string
-  address1: string
-  address2: string
-  address3: string
-  postcode: string
-  property_type: string
-  built_form: string
-  inspection_date: string
-  current_energy_rating: string
-  potential_energy_rating: string
-  total_floor_area: string
-  construction_age_band: string
-  main_fuel: string
-  walls_description: string
-  roof_description: string
-  windows_description: string
-  floor_description: string
-  hot_water_description: string
-  mainheat_description: string
-  mainheatc_description: string
-  lighting_description: string
-  energy_consumption_current: string
-  energy_cost_current: string
-  energy_cost_potential: string
-  co2_emissions_current: string
-  number_habitable_rooms: string
-  heating_cost_current: string
-  hot_water_cost_current: string
-  lighting_cost_current: string
-  low_energy_lighting: string
-  tenure: string
-  local_authority: string
-}
+const UNITS = ['each', 'hour', 'day', 'm', 'm²', 'm³', 'kg', 'litre', 'pack', 'set']
+const TRADES: { value: TradeType; label: string }[] = [
+  { value: 'plumbing', label: 'Plumbing' },
+  { value: 'heating', label: 'Heating' },
+  { value: 'electrical', label: 'Electrical' },
+  { value: 'gas', label: 'Gas' },
+  { value: 'building', label: 'Building' },
+  { value: 'roofing', label: 'Roofing' },
+  { value: 'carpentry', label: 'Carpentry' },
+  { value: 'painting', label: 'Decorating' },
+  { value: 'renewables', label: 'Renewables' },
+  { value: 'general', label: 'General' },
+  { value: 'other', label: 'Other' },
+]
 
-type HeatLoss = {
-  design_load_w: number
-  recommended_kw: number
-  fabric_loss_w: number
-  ventilation_loss_w: number
-  dhw_demand_w: number
-  annual_kwh_heat: number
-  current_heating_cost: number
-  current_hotwater_cost: number
-  current_relevant_cost: number
-}
-
-// Map EPC property_type string to our DB enum
-function mapPropertyType(epcType: string): string {
-  const t = (epcType || '').toLowerCase()
-  if (t.includes('semi')) return 'semi_detached'
-  if (t.includes('detached')) return 'detached'
-  if (t.includes('end-terrace') || t.includes('end terrace')) return 'terraced'
-  if (t.includes('terrace') || t.includes('mid-terrace')) return 'terraced'
-  if (t.includes('flat') || t.includes('maisonette')) return 'flat'
-  if (t.includes('bungalow')) return 'bungalow'
-  if (t.includes('house')) return 'detached' // generic fallback
-  return 'other'
-}
-
-// Format lmk_key into readable EPC certificate number
-function formatEpcCertNumber(lmk: string): string {
-  if (!lmk) return ''
-  // EPC cert numbers are typically formatted as groups separated by hyphens
-  // The lmk_key is a UUID-like string — display as-is but formatted
-  const clean = lmk.replace(/-/g, '').toUpperCase()
-  if (clean.length >= 20) {
-    return `${clean.slice(0, 4)}-${clean.slice(4, 8)}-${clean.slice(8, 12)}-${clean.slice(12, 16)}-${clean.slice(16, 20)}`
-  }
-  return lmk
-}
-
-function hasHeatPump(epc: EpcData): boolean {
-  const fields = [
-    epc.mainheat_description || '',
-    epc.mainheatc_description || '',
-    epc.hot_water_description || '',
-  ].join(' ').toLowerCase()
-  return fields.includes('heat pump') || fields.includes('ground source') || fields.includes('air source')
-}
-
-// Simplified reliable heat loss — based on SAP Table 1 method
-// This approach uses whole-dwelling heat loss coefficients by era/type
-// which match published SAP/MCS data far better than element-by-element estimates
-function calcHeatLoss(epc: EpcData): HeatLoss {
-  const area = parseFloat(epc.total_floor_area) || 80
-  const era = epc.construction_age_band || ''
-  const propType = mapPropertyType(epc.property_type || '')
-  const wallsDesc = (epc.walls_description || '').toLowerCase()
-  const roofDesc = (epc.roof_description || '').toLowerCase()
-  const windowsDesc = (epc.windows_description || '').toLowerCase()
-
-  // Heat loss coefficient (W/m²K) by era — these are calibrated against
-  // published MCS/SAP data for typical UK dwellings
-  let hlc = 3.5 // W/m²K — default mid-era
-
-  if (era.includes('2012') || era.includes('2007')) hlc = 1.5
-  else if (era.includes('2000') || era.includes('1996')) hlc = 1.8
-  else if (era.includes('1991') || era.includes('1983')) hlc = 2.2
-  else if (era.includes('1976') || era.includes('1967')) hlc = 2.8
-  else if (era.includes('1950') || era.includes('1966')) hlc = 3.2
-  else if (era.includes('1930') || era.includes('1949')) hlc = 3.6
-  else if (era.includes('before') || era.includes('1900') || era.includes('1929')) hlc = 4.0
-
-  // Adjust for insulation improvements visible in EPC
-  if (wallsDesc.includes('external insulation') || wallsDesc.includes('internal insulation')) hlc -= 0.4
-  else if (wallsDesc.includes('filled cavity') || wallsDesc.includes('cavity insulation')) hlc -= 0.3
-  if (roofDesc.includes('200mm') || roofDesc.includes('300mm') || roofDesc.includes('well insulated')) hlc -= 0.3
-  else if (roofDesc.includes('100mm') || roofDesc.includes('150mm') || roofDesc.includes('insulated')) hlc -= 0.15
-  if (windowsDesc.includes('triple')) hlc -= 0.2
-  else if (windowsDesc.includes('double') && windowsDesc.includes('low-e')) hlc -= 0.15
-  else if (windowsDesc.includes('double')) hlc -= 0.1
-
-  // Detached properties lose more heat; flats lose less
-  if (propType === 'detached') hlc += 0.3
-  else if (propType === 'flat') hlc -= 0.5
-  else if (propType === 'terraced') hlc -= 0.2
-
-  hlc = Math.max(hlc, 1.0) // floor
-
-  const deltaT = 24 // 21°C indoor - (-3°C) outdoor
-  const totalHeatLossW = Math.round(area * hlc * deltaT)
-
-  // Split into fabric / ventilation / DHW for display
-  // Approximate split: fabric ~65%, ventilation ~20%, DHW ~15%
-  const fabricLoss = Math.round(totalHeatLossW * 0.63)
-  const ventLoss = Math.round(totalHeatLossW * 0.22)
-  const dhwDemand = Math.round(area * 7) // fixed DHW ~7W/m²
-
-  const designLoad = fabricLoss + ventLoss + dhwDemand
-  const recommendedKw = Math.ceil(designLoad / 1000)
-
-  // Annual energy
-  const annualKwhHeat = parseInt(epc.energy_consumption_current) || Math.round(area * 110)
-
-  // Costs — prefer EPC data, fall back to fuel-based estimate
-  const heatingCost = parseInt(epc.heating_cost_current) || Math.round(area * 8)
-  const hotWaterCost = parseInt(epc.hot_water_cost_current) || Math.round(area * 2.5)
-  const relevantCost = heatingCost + hotWaterCost
-
+function newLineItem(): LineItemDraft {
   return {
-    design_load_w: designLoad,
-    recommended_kw: recommendedKw,
-    fabric_loss_w: fabricLoss,
-    ventilation_loss_w: ventLoss,
-    dhw_demand_w: dhwDemand,
-    annual_kwh_heat: annualKwhHeat,
-    current_heating_cost: heatingCost,
-    current_hotwater_cost: hotWaterCost,
-    current_relevant_cost: relevantCost,
+    id: crypto.randomUUID(),
+    name: '', description: '', quantity: 1,
+    unit: 'each', unit_price: 0, cost_price: 0,
+    vat_rate: 'standard', is_material: false,
   }
 }
 
-const emptyCustomer: CustomerData = {
-  first_name: '',
-  last_name: '',
-  email: '',
-  phone: '',
-  address_line1: '',
-  address_line2: '',
-  city: '',
-  postcode: '',
-}
+function NewWorkInner() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const defaultType = searchParams.get('type') || 'quote'
 
-export default function NewJobPage() {
-  const [step, setStep] = useState<Step>(1)
-  const [customer, setCustomer] = useState<CustomerData>(emptyCustomer)
-  const [epcResults, setEpcResults] = useState<EpcData[]>([])
-  const [selectedEpc, setSelectedEpc] = useState<EpcData | null>(null)
-  const [heatLoss, setHeatLoss] = useState<HeatLoss | null>(null)
-  const [epcLoading, setEpcLoading] = useState(false)
-  const [epcError, setEpcError] = useState('')
-  const [showEpcList, setShowEpcList] = useState(false)
-  const [claimBus, setClaimBus] = useState<boolean | null>(null)
-  const [busEligible, setBusEligible] = useState(false)
-  const [busReason, setBusReason] = useState('')
-  const [heatPumpDetected, setHeatPumpDetected] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [accountId, setAccountId] = useState('')
+  const [userId, setUserId] = useState('')
 
-  function updateCustomer(field: keyof CustomerData, value: string) {
-    setCustomer(prev => ({ ...prev, [field]: value }))
-  }
+  // Customers
+  const [customers, setCustomers] = useState<any[]>([])
+  const [customerSearch, setCustomerSearch] = useState('')
+  const [showNewCustomer, setShowNewCustomer] = useState(false)
+
+  // Form
+  const [workType, setWorkType] = useState<'quote'|'job'|'invoice'>(defaultType as any)
+  const [form, setForm] = useState({
+    customer_id: '',
+    trade_type: 'general' as TradeType,
+    scheduled_start: '',
+    scheduled_end: '',
+    site_address_line1: '',
+    site_postcode: '',
+    internal_notes: '',
+    customer_notes: '',
+  })
+
+  // New customer
+  const [newCustomer, setNewCustomer] = useState({
+    first_name: '', last_name: '', email: '',
+    phone: '', address_line1: '', postcode: '',
+    is_company: false, company_name: '',
+  })
+
+  // Line items
+  const [lineItems, setLineItems] = useState<LineItemDraft[]>([newLineItem()])
+
+  // Catalogue
+  const [catalogue, setCatalogue] = useState<any[]>([])
+  const [sites, setSites] = useState<any[]>([])
+  const [siteId, setSiteId] = useState('')
 
   useEffect(() => {
-    if (step === 2 && customer.postcode && epcResults.length === 0 && !epcLoading) {
-      searchEpc(customer.postcode)
-    }
-  }, [step])
-
-  async function searchEpc(postcode: string) {
-    setEpcLoading(true)
-    setEpcError('')
-    try {
-      const res = await fetch(`/api/epc?postcode=${encodeURIComponent(postcode)}`)
-      const data = await res.json()
-      if (data.rows && data.rows.length > 0) {
-        setEpcResults(data.rows)
-        setShowEpcList(true)
-        if (data.rows.length === 1) handleSelectEpc(data.rows[0])
-      } else {
-        setEpcError('No EPC records found for this postcode.')
-      }
-    } catch {
-      setEpcError('Could not connect to EPC database.')
-    }
-    setEpcLoading(false)
-  }
-
-  function handleSelectEpc(epc: EpcData) {
-    setSelectedEpc(epc)
-    setShowEpcList(false)
-    const hl = calcHeatLoss(epc)
-    setHeatLoss(hl)
-    const hp = hasHeatPump(epc)
-    setHeatPumpDetected(hp)
-    setBusEligible(!hp)
-    setBusReason(hp
-      ? 'A heat pump appears to already be installed — BUS cannot be claimed'
-      : `Valid EPC (${epc.current_energy_rating}) confirmed · No existing heat pump detected`
-    )
-  }
-
-  function checkBusFromEpc() {
-    if (!selectedEpc) {
-      setBusEligible(true)
-      setBusReason('No EPC data — eligibility to be confirmed at survey stage')
-    }
-  }
-
-  async function createJob() {
-    setSaving(true)
-    setError('')
-    try {
+    async function load() {
       const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { window.location.replace('/login'); return }
+      if (!session) { router.push('/login'); return }
+      setUserId(session.user.id)
 
-      const { data: profile } = await (supabase as any)
-        .from('installer_profiles')
-        .select('id')
-        .eq('user_id', session.user.id)
-        .single()
+      const { data: u } = await (supabase as any).from('users').select('account_id').eq('id', session.user.id).single()
+      if (!u?.account_id) { router.push('/onboarding'); return }
+      setAccountId(u.account_id)
 
-      if (!profile) {
-        setError('Installer profile not found. Please complete your profile first.')
-        setSaving(false)
-        return
+      // If duplicating an existing work, pre-fill from it
+    const duplicateId = new URLSearchParams(window.location.search).get('duplicate')
+    if (duplicateId) {
+      const { data: orig } = await (supabase as any)
+        .from('works').select('*, line_items(*)').eq('id', duplicateId).single()
+      if (orig) {
+        setForm((p: any) => ({
+          ...p,
+          trade_type: orig.trade_type,
+          site_address_line1: orig.site_address_line1 || '',
+          site_postcode: orig.site_postcode || '',
+          customer_notes: orig.customer_notes || '',
+          internal_notes: orig.internal_notes || '',
+          customer_id: orig.customer_id,
+        }))
+        if (orig.line_items?.length > 0) {
+          setLineItems(orig.line_items.map((i: any) => ({
+            id: crypto.randomUUID(),
+            name: i.name, description: i.description || '',
+            quantity: i.quantity, unit: i.unit,
+            unit_price: i.unit_price, cost_price: i.cost_price || 0,
+            vat_rate: i.vat_rate, is_material: i.is_material,
+          })))
+        }
+      }
+    }
+
+    const [{ data: custs }, { data: cat }] = await Promise.all([
+        (supabase as any).from('customers').select('*').order('last_name'),
+        (supabase as any).from('catalogue_items').select('*').eq('is_active', true).order('name'),
+      ])
+      setCustomers(custs || [])
+      setCatalogue(cat || [])
+    }
+    load()
+  }, [router])
+
+  function upd(updates: Partial<typeof form>) {
+    setForm(p => ({ ...p, ...updates }))
+  }
+
+  // Line item helpers
+  function updateItem(id: string, updates: Partial<LineItemDraft>) {
+    setLineItems(p => p.map(i => i.id === id ? { ...i, ...updates } : i))
+  }
+
+  function addItem() {
+    setLineItems(p => [...p, newLineItem()])
+  }
+
+  function removeItem(id: string) {
+    setLineItems(p => p.filter(i => i.id !== id))
+  }
+
+  function addFromCatalogue(cat: any) {
+    setLineItems(p => [...p, {
+      id: crypto.randomUUID(),
+      name: cat.name,
+      description: cat.description || '',
+      quantity: 1,
+      unit: cat.unit || 'each',
+      unit_price: cat.unit_price,
+      cost_price: cat.cost_price || 0,
+      vat_rate: cat.vat_rate || 'standard',
+      is_material: cat.category === 'Material',
+    }])
+  }
+
+  // Totals
+  function lineGross(item: LineItemDraft): number {
+    const net = item.quantity * item.unit_price
+    const vatPct = VAT_RATE_PCT[item.vat_rate] / 100
+    return net * (1 + vatPct)
+  }
+
+  function lineVat(item: LineItemDraft): number {
+    const net = item.quantity * item.unit_price
+    return net * (VAT_RATE_PCT[item.vat_rate] / 100)
+  }
+
+  const subtotalNet = lineItems.reduce((s, i) => s + i.quantity * i.unit_price, 0)
+  const totalVat = lineItems.reduce((s, i) => s + lineVat(i), 0)
+  const totalGross = subtotalNet + totalVat
+  const totalCost = lineItems.reduce((s, i) => s + i.quantity * (i.cost_price || 0), 0)
+  const margin = totalCost > 0 ? ((subtotalNet - totalCost) / subtotalNet) * 100 : 0
+
+  // Filtered customers
+  const filteredCustomers = customers.filter(c => {
+    const name = `${c.first_name} ${c.last_name} ${c.company_name || ''}`.toLowerCase()
+    return !customerSearch || name.includes(customerSearch.toLowerCase())
+  })
+
+  async function handleSave() {
+    if (!form.customer_id && !showNewCustomer) { setError('Please select or create a customer'); return }
+    if (showNewCustomer && !newCustomer.first_name) { setError('Customer first name is required'); return }
+    if (lineItems.length === 0 || !lineItems[0].name) { setError('Add at least one line item'); return }
+
+    setSaving(true); setError('')
+    try {
+      let customerId = form.customer_id
+
+      // Create new customer if needed
+      if (showNewCustomer) {
+        const { data: cust, error: custErr } = await (supabase as any)
+          .from('customers')
+          .insert({ ...newCustomer, account_id: accountId, created_by: userId })
+          .select().single()
+        if (custErr) throw custErr
+        customerId = cust.id
       }
 
-      const mappedPropertyType = selectedEpc ? mapPropertyType(selectedEpc.property_type) : null
+      // Determine initial status
+      const status = workType === 'quote' ? 'draft'
+        : workType === 'job' ? 'job_scheduled'
+        : 'invoice_sent'
 
-      const { data: newCustomer, error: custError } = await (supabase as any)
-        .from('customers')
+      // Create work record
+      const { data: work, error: workErr } = await (supabase as any)
+        .from('works')
         .insert({
-          installer_id: profile.id,
-          first_name: customer.first_name,
-          last_name: customer.last_name,
-          email: customer.email || null,
-          phone: customer.phone,
-          address_line1: customer.address_line1,
-          address_line2: customer.address_line2 || null,
-          city: customer.city,
-          postcode: customer.postcode,
-          property_type: mappedPropertyType,
-          floor_area_m2: selectedEpc ? parseFloat(selectedEpc.total_floor_area) || null : null,
-          epc_rating: selectedEpc?.current_energy_rating || null,
-          bus_eligible: claimBus === true && busEligible,
-          bus_checked_at: new Date().toISOString(),
-          notes: selectedEpc ? `EPC Certificate Number: ${selectedEpc.lmk_key}` : null,
+          account_id: accountId,
+          customer_id: customerId,
+          status,
+          trade_type: form.trade_type,
+          scheduled_start: form.scheduled_start || null,
+          scheduled_end: form.scheduled_end || null,
+          site_id: siteId || null,
+          site_address_line1: form.site_address_line1 || null,
+          site_postcode: form.site_postcode || null,
+          internal_notes: form.internal_notes || null,
+          customer_notes: form.customer_notes || null,
+          subtotal_net: subtotalNet,
+          total_vat: totalVat,
+          total_gross: totalGross,
+          total_cost: totalCost,
+          gross_margin: subtotalNet - totalCost,
+          margin_pct: margin,
+          amount_due: totalGross,
+          created_by: userId,
+          quote_date: workType === 'quote' ? new Date().toISOString().split('T')[0] : null,
+          invoice_date: workType === 'invoice' ? new Date().toISOString().split('T')[0] : null,
         })
-        .select()
-        .single()
+        .select().single()
 
-      if (custError || !newCustomer) {
-        setError('Failed to create customer: ' + custError?.message)
-        setSaving(false)
-        return
+      if (workErr) throw workErr
+
+      // Insert line items
+      const itemsToInsert = lineItems
+        .filter(i => i.name.trim())
+        .map((i, idx) => ({
+          work_id: work.id,
+          sort_order: idx,
+          name: i.name,
+          description: i.description || null,
+          quantity: i.quantity,
+          unit: i.unit,
+          unit_price: i.unit_price,
+          cost_price: i.cost_price || null,
+          vat_rate: i.vat_rate,
+          line_vat: lineVat(i),
+          line_gross: lineGross(i),
+          is_material: i.is_material,
+        }))
+
+      if (itemsToInsert.length > 0) {
+        const { error: itemErr } = await (supabase as any).from('line_items').insert(itemsToInsert)
+        if (itemErr) throw itemErr
       }
 
-      const { data: newJob, error: jobError } = await (supabase as any)
-        .from('jobs')
-        .insert({
-          installer_id: profile.id,
-          customer_id: newCustomer.id,
-          hp_type: 'ashp',
-          bus_status: claimBus === true && busEligible ? 'eligible' : 'not_started',
-        })
-        .select()
-        .single()
+      // Log activity
+      await (supabase as any).from('activity_log').insert({
+        account_id: accountId,
+        entity_type: 'work',
+        entity_id: work.id,
+        event: 'created',
+        summary: `${workType.charAt(0).toUpperCase() + workType.slice(1)} created`,
+        user_id: userId,
+      })
 
-      if (jobError || !newJob) {
-        setError('Failed to create job: ' + jobError?.message)
-        setSaving(false)
-        return
-      }
-
-      if (heatLoss && selectedEpc) {
-        await (supabase as any)
-          .from('heat_loss_calculations')
-          .insert({
-            job_id: newJob.id,
-            property_type: mappedPropertyType,
-            build_era: selectedEpc.construction_age_band || null,
-            floor_area_m2: parseFloat(selectedEpc.total_floor_area) || null,
-            design_temp_c: -3,
-            indoor_temp_c: 21,
-            fabric_loss_w: heatLoss.fabric_loss_w,
-            ventilation_loss_w: heatLoss.ventilation_loss_w,
-            dhw_demand_w: heatLoss.dhw_demand_w,
-            total_heat_loss_w: heatLoss.design_load_w,
-            recommended_hp_kw: heatLoss.recommended_kw,
-          })
-      }
-
-      if (claimBus === true && busEligible) {
-        await (supabase as any)
-          .from('audit_log')
-          .insert({
-            job_id: newJob.id,
-            user_id: session.user.id,
-            action: 'bus_application_requested',
-            stage: 'customer',
-            entity_type: 'job',
-            entity_id: newJob.id,
-            description: `BUS application requested for ${customer.first_name} ${customer.last_name} — £7,500 grant`,
-            metadata: { bus_grant: 7500, epc_rating: selectedEpc?.current_energy_rating, epc_cert: selectedEpc?.lmk_key },
-          })
-      }
-
-      await (supabase as any)
-        .from('audit_log')
-        .insert({
-          job_id: newJob.id,
-          user_id: session.user.id,
-          action: 'job_created',
-          stage: 'customer',
-          entity_type: 'job',
-          entity_id: newJob.id,
-          description: `Job created for ${customer.first_name} ${customer.last_name}`,
-        })
-
-      window.location.replace('/dashboard')
-    } catch (err) {
-      setError('Something went wrong: ' + String(err))
+      router.push(`/works/${work.id}`)
+    } catch (e: any) {
+      setError(e.message)
       setSaving(false)
     }
   }
 
-  const inputClass = "w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 transition-colors"
-
-  const steps = [
-    { n: 1, label: 'Customer' },
-    { n: 2, label: 'Property & EPC' },
-    { n: 3, label: 'BUS grant' },
-    { n: 4, label: 'Confirm' },
-  ]
+  const inp = "w-full bg-gray-900 border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-amber-500 transition-colors"
+  const lbl = "block text-xs font-medium text-gray-400 mb-1.5"
+  const selectedCustomer = customers.find(c => c.id === form.customer_id)
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-emerald-700 rounded-lg flex items-center justify-center">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="white">
-              <path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z" />
-            </svg>
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-gray-900">Enerus Plus</div>
-            <div className="text-xs text-gray-400 uppercase tracking-wide">MCS Umbrella</div>
-          </div>
+    <div className="min-h-screen bg-gray-950">
+      {/* Top bar */}
+      <div className="bg-gray-900 border-b border-gray-800 px-6 h-14 flex items-center gap-3 sticky top-0 z-20">
+        <button onClick={() => router.back()} className="text-gray-500 hover:text-gray-300 text-sm">← Back</button>
+        <span className="text-gray-700">/</span>
+        <span className="text-sm font-semibold text-white">New work</span>
+        <div className="ml-auto flex items-center gap-3">
+          {error && <span className="text-xs text-red-400">{error}</span>}
+          <button onClick={handleSave} disabled={saving}
+            className="bg-amber-500 hover:bg-amber-400 disabled:bg-gray-700 disabled:text-gray-500 text-gray-950 text-xs font-bold px-5 py-2 rounded-lg transition-colors">
+            {saving ? 'Saving…' : `Create ${workType}`}
+          </button>
         </div>
-        <a href="/dashboard" className="text-xs text-gray-400 hover:text-gray-600 transition-colors">← Dashboard</a>
       </div>
 
-      <div className="max-w-2xl mx-auto px-6 py-8">
+      <div className="max-w-5xl mx-auto px-6 py-6 space-y-5">
 
-        {/* Step indicator */}
-        <div className="mb-8">
-          <div className="flex items-center">
-            {steps.map((s, i) => (
-              <div key={s.n} className="flex items-center flex-1">
-                <div className="flex flex-col items-center flex-1">
-                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium transition-colors ${
-                    step > s.n ? 'bg-emerald-700 text-white' :
-                    step === s.n ? 'bg-emerald-700 text-white' :
-                    'bg-gray-200 text-gray-400'
-                  }`}>
-                    {step > s.n ? '✓' : s.n}
-                  </div>
-                  <div className={`text-xs mt-1 text-center ${step >= s.n ? 'text-emerald-700 font-medium' : 'text-gray-400'}`}>
-                    {s.label}
-                  </div>
-                </div>
-                {i < steps.length - 1 && (
-                  <div className={`h-0.5 flex-1 mb-4 ${step > s.n ? 'bg-emerald-600' : 'bg-gray-200'}`} />
-                )}
-              </div>
-            ))}
-          </div>
+        {/* Type selector */}
+        <div className="flex gap-2">
+          {(['quote','job','invoice'] as const).map(t => (
+            <button key={t} onClick={() => setWorkType(t)}
+              className={`px-5 py-2 rounded-xl text-sm font-semibold border transition-colors capitalize ${
+                workType === t
+                  ? 'bg-amber-500 border-amber-500 text-gray-950'
+                  : 'bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500'
+              }`}>
+              {t}
+            </button>
+          ))}
         </div>
 
-        {/* STEP 1 — Customer details */}
-        {step === 1 && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <h2 className="text-sm font-medium text-gray-900 mb-5">Customer details</h2>
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1.5">First name *</label>
-                  <input type="text" value={customer.first_name} onChange={e => updateCustomer('first_name', e.target.value)} placeholder="James" className={inputClass}/>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Last name *</label>
-                  <input type="text" value={customer.last_name} onChange={e => updateCustomer('last_name', e.target.value)} placeholder="Thornton" className={inputClass}/>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Email</label>
-                  <input type="email" value={customer.email} onChange={e => updateCustomer('email', e.target.value)} placeholder="james@example.com" className={inputClass}/>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Phone *</label>
-                  <input type="tel" value={customer.phone} onChange={e => updateCustomer('phone', e.target.value)} placeholder="07700 900 000" className={inputClass}/>
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Address line 1 *</label>
-                <input type="text" value={customer.address_line1} onChange={e => updateCustomer('address_line1', e.target.value)} placeholder="14 Oak Avenue" className={inputClass}/>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1.5">Address line 2</label>
-                <input type="text" value={customer.address_line2} onChange={e => updateCustomer('address_line2', e.target.value)} placeholder="Optional" className={inputClass}/>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1.5">City *</label>
-                  <input type="text" value={customer.city} onChange={e => updateCustomer('city', e.target.value)} placeholder="Manchester" className={inputClass}/>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Postcode *</label>
-                  <input type="text" value={customer.postcode} onChange={e => updateCustomer('postcode', e.target.value)} placeholder="M14 7AZ" className={inputClass}/>
-                </div>
-              </div>
-            </div>
-            {error && <p className="text-xs text-red-600 mt-3">{error}</p>}
-            <div className="mt-6 flex justify-end">
-              <button
-                onClick={() => {
-                  if (!customer.first_name || !customer.last_name || !customer.phone || !customer.postcode) {
-                    setError('Please fill in all required fields')
-                    return
-                  }
-                  setError('')
-                  setStep(2)
-                }}
-                className="bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium px-6 py-2.5 rounded-lg transition-colors"
-              >
-                Next: Property & EPC →
-              </button>
-            </div>
-          </div>
-        )}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
 
-        {/* STEP 2 — Property & EPC */}
-        {step === 2 && (
-          <div className="space-y-4">
-            {epcLoading && (
-              <div className="bg-white border border-gray-200 rounded-xl p-6 flex items-center gap-3">
-                <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin flex-shrink-0"/>
-                <span className="text-sm text-gray-600">Looking up EPC register for {customer.postcode}...</span>
-              </div>
-            )}
+          {/* LEFT: Main form */}
+          <div className="lg:col-span-2 space-y-5">
 
-            {epcError && !epcLoading && (
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-                <div className="text-sm font-medium text-amber-900 mb-1">EPC not found</div>
-                <div className="text-xs text-amber-700 mb-2">{epcError} You can continue — property details will be collected at survey stage.</div>
-                <button onClick={() => searchEpc(customer.postcode)} className="text-xs text-amber-800 underline">Try again</button>
+            {/* Customer */}
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-sm font-semibold text-white">Customer</div>
+                <button onClick={() => setShowNewCustomer(p => !p)}
+                  className="text-xs text-amber-400 hover:text-amber-300">
+                  {showNewCustomer ? '← Choose existing' : '+ New customer'}
+                </button>
               </div>
-            )}
 
-            {showEpcList && epcResults.length > 1 && (
-              <div className="bg-white border border-gray-200 rounded-xl p-6">
-                <div className="text-sm font-medium text-gray-900 mb-1">Select the correct property</div>
-                <div className="text-xs text-gray-500 mb-4">{epcResults.length} EPC records found for {customer.postcode}</div>
-                <div className="space-y-2 max-h-72 overflow-y-auto">
-                  {epcResults.map((epc, i) => (
-                    <button
-                      key={i}
-                      onClick={() => handleSelectEpc(epc)}
-                      className="w-full text-left p-3 rounded-lg border border-gray-200 hover:border-emerald-400 hover:bg-emerald-50 transition-colors"
-                    >
-                      <div className="text-sm font-medium text-gray-900">
-                        {[epc.address1, epc.address2, epc.address3].filter(Boolean).join(', ')}
+              {!showNewCustomer ? (
+                <div className="space-y-3">
+                  <input type="text" placeholder="Search customers…" value={customerSearch}
+                    onChange={e => setCustomerSearch(e.target.value)} className={inp}/>
+                  {selectedCustomer && (
+                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-medium text-amber-300">
+                          {selectedCustomer.is_company ? selectedCustomer.company_name : `${selectedCustomer.first_name} ${selectedCustomer.last_name}`}
+                        </div>
+                        <div className="text-xs text-gray-500">{selectedCustomer.address_line1} {selectedCustomer.postcode}</div>
                       </div>
-                      <div className="flex items-center gap-3 mt-1 flex-wrap">
-                        <span className="text-xs text-gray-500">{epc.property_type}</span>
-                        <span className="text-xs text-gray-400">·</span>
-                        <span className="text-xs text-gray-500">EPC {epc.current_energy_rating}</span>
-                        <span className="text-xs text-gray-400">·</span>
-                        <span className="text-xs text-gray-500">{epc.total_floor_area}m²</span>
-                        <span className="text-xs text-gray-400">·</span>
-                        <span className="text-xs text-gray-500">{epc.inspection_date}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {selectedEpc && !showEpcList && (
-              <>
-                <div className="bg-white border border-gray-200 rounded-xl p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="text-sm font-medium text-gray-900">Property details</div>
-                    <button onClick={() => setShowEpcList(true)} className="text-xs text-emerald-700 hover:underline">Change property</button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-x-6 gap-y-3 mb-5">
-                    {[
-                      { label: 'Address', value: [selectedEpc.address1, selectedEpc.address2, selectedEpc.address3].filter(Boolean).join(', '), full: true },
-                      { label: 'Postcode', value: selectedEpc.postcode },
-                      { label: 'Property type', value: selectedEpc.property_type },
-                      { label: 'Built form', value: selectedEpc.built_form },
-                      { label: 'Construction era', value: selectedEpc.construction_age_band },
-                      { label: 'Floor area', value: selectedEpc.total_floor_area ? `${selectedEpc.total_floor_area} m²` : '—' },
-                      { label: 'EPC rating (current)', value: selectedEpc.current_energy_rating },
-                      { label: 'EPC rating (potential)', value: selectedEpc.potential_energy_rating },
-                      { label: 'Main heating', value: selectedEpc.mainheat_description, full: true },
-                      { label: 'Hot water', value: selectedEpc.hot_water_description, full: true },
-                      { label: 'Main fuel', value: selectedEpc.main_fuel },
-                      { label: 'Habitable rooms', value: selectedEpc.number_habitable_rooms },
-                      { label: 'Walls', value: selectedEpc.walls_description, full: true },
-                      { label: 'Roof', value: selectedEpc.roof_description, full: true },
-                      { label: 'Windows', value: selectedEpc.windows_description, full: true },
-                    ].map(row => (
-                      <div key={row.label} className={row.full ? 'col-span-2' : 'col-span-1'}>
-                        <div className="text-xs text-gray-400">{row.label}</div>
-                        <div className="text-xs font-medium text-gray-900 mt-0.5">{row.value || '—'}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* EPC Certificate Number */}
-                  <div className="border-t border-gray-100 pt-4">
-                    <div className="text-xs font-medium text-gray-600 mb-2">EPC Certificate Number</div>
-                    <div className="flex items-center gap-2">
-                      <div className="text-sm font-mono font-medium bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 flex-1 text-gray-800 tracking-wider">
-                        {formatEpcCertNumber(selectedEpc.lmk_key)}
-                      </div>
-                      <button
-                        onClick={() => navigator.clipboard.writeText(selectedEpc.lmk_key)}
-                        className="text-xs bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-3 py-2 rounded-lg transition-colors flex-shrink-0 border border-emerald-200"
-                      >
-                        Copy
-                      </button>
+                      <button onClick={() => { upd({ customer_id: '' }); setCustomerSearch('') }}
+                        className="text-xs text-gray-500 hover:text-red-400">✕</button>
                     </div>
-                    <div className="text-xs text-gray-400 mt-1.5">Inspection date: {selectedEpc.inspection_date}</div>
-                  </div>
+                  )}
+                  {/* Site selector - shows after customer selected */}
+              {selectedCustomer && sites.length > 0 && (
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Site / property</label>
+                  <select value={siteId} onChange={e => {
+                    setSiteId(e.target.value)
+                    const site = sites.find((s: any) => s.id === e.target.value)
+                    if (site) upd({ site_address_line1: site.address_line1 || '', site_postcode: site.postcode || '' })
+                  }} className="w-full bg-gray-900 border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-amber-500">
+                    {sites.map((s: any) => (
+                      <option key={s.id} value={s.id}>{s.name}{s.postcode ? ` — ${s.postcode}` : ''}{s.is_default ? ' (default)' : ''}</option>
+                    ))}
+                  </select>
+                  {siteId && (() => {
+                    const site = sites.find((s: any) => s.id === siteId)
+                    if (!site) return null
+                    return (
+                      <div className="mt-1.5 text-xs text-gray-600">
+                        {[site.property_type, site.epc_rating ? `EPC ${site.epc_rating}` : null, site.floor_area_m2 ? `${site.floor_area_m2}m²` : null].filter(Boolean).join(' · ')}
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
 
-                  {heatPumpDetected && (
-                    <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
-                      <div className="text-xs font-medium text-amber-800">Heat pump detected in EPC</div>
-                      <div className="text-xs text-amber-700 mt-0.5">The EPC indicates a heat pump may already be installed. Please verify on site.</div>
+              {!selectedCustomer && (
+                    <div className="max-h-48 overflow-y-auto space-y-1">
+                      {filteredCustomers.length === 0 ? (
+                        <div className="text-xs text-gray-600 py-4 text-center">No customers found</div>
+                      ) : filteredCustomers.map(c => (
+                        <button key={c.id} onClick={async () => {
+                          upd({ customer_id: c.id, site_address_line1: c.address_line1 || '', site_postcode: c.postcode || '' })
+                          setCustomerSearch('')
+                          setSiteId('')
+                          const { data: s } = await (supabase as any).from('sites').select('*').eq('customer_id', c.id).order('is_default', { ascending: false })
+                          setSites(s || [])
+                          // Auto-select default site
+                          const def = (s || []).find((x: any) => x.is_default)
+                          if (def) { setSiteId(def.id); upd({ site_address_line1: def.address_line1 || '', site_postcode: def.postcode || '' }) }
+                        }}
+                          className="w-full text-left px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 transition-colors">
+                          <div className="text-sm text-gray-200">
+                            {c.is_company ? c.company_name : `${c.first_name} ${c.last_name}`}
+                          </div>
+                          <div className="text-xs text-gray-500">{c.address_line1} · {c.postcode}</div>
+                        </button>
+                      ))}
                     </div>
                   )}
                 </div>
-
-                {/* Heat loss */}
-                {heatLoss && (
-                  <div className="bg-white border border-gray-200 rounded-xl p-6">
-                    <div className="text-sm font-medium text-gray-900 mb-1">Estimated heat loss</div>
-                    <p className="text-xs text-gray-400 mb-4">Preliminary estimate based on EPC data. Full MCS calculation completed at design stage.</p>
-                    <div className="grid grid-cols-2 gap-3 mb-5">
-                      <div className="bg-emerald-50 rounded-lg p-3 text-center">
-                        <div className="text-xs text-emerald-600 mb-1">Recommended system</div>
-                        <div className="text-xl font-semibold text-emerald-700">{heatLoss.recommended_kw} kW ASHP</div>
-                      </div>
-                      <div className="bg-gray-50 rounded-lg p-3 text-center">
-                        <div className="text-xs text-gray-500 mb-1">Design load</div>
-                        <div className="text-xl font-semibold text-gray-900">{(heatLoss.design_load_w / 1000).toFixed(1)} kW</div>
-                      </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => setNewCustomer(p => ({ ...p, is_company: !p.is_company }))}
+                      className={`w-8 h-4 rounded-full transition-colors relative ${newCustomer.is_company ? 'bg-amber-500' : 'bg-gray-700'}`}>
+                      <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${newCustomer.is_company ? 'translate-x-4' : 'translate-x-0.5'}`}/>
+                    </button>
+                    <span className="text-xs text-gray-400">Company</span>
+                  </div>
+                  {newCustomer.is_company && (
+                    <div>
+                      <label className={lbl}>Company name</label>
+                      <input type="text" className={inp} value={newCustomer.company_name}
+                        onChange={e => setNewCustomer(p => ({ ...p, company_name: e.target.value }))}/>
                     </div>
-                    <div className="space-y-2 mb-5 text-xs">
-                      <div className="flex justify-between py-1.5 border-b border-gray-100">
-                        <span className="text-gray-500">Fabric heat loss</span>
-                        <span className="font-medium">{heatLoss.fabric_loss_w.toLocaleString()} W</span>
-                      </div>
-                      <div className="flex justify-between py-1.5 border-b border-gray-100">
-                        <span className="text-gray-500">Ventilation loss</span>
-                        <span className="font-medium">{heatLoss.ventilation_loss_w.toLocaleString()} W</span>
-                      </div>
-                      <div className="flex justify-between py-1.5 border-b border-gray-100">
-                        <span className="text-gray-500">DHW demand</span>
-                        <span className="font-medium">{heatLoss.dhw_demand_w.toLocaleString()} W</span>
-                      </div>
-                      <div className="flex justify-between py-1.5 font-medium">
-                        <span className="text-gray-900">Total design load</span>
-                        <span className="text-emerald-700">{heatLoss.design_load_w.toLocaleString()} W</span>
-                      </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={lbl}>First name *</label>
+                      <input type="text" className={inp} value={newCustomer.first_name}
+                        onChange={e => setNewCustomer(p => ({ ...p, first_name: e.target.value }))}/>
                     </div>
+                    <div>
+                      <label className={lbl}>Last name</label>
+                      <input type="text" className={inp} value={newCustomer.last_name}
+                        onChange={e => setNewCustomer(p => ({ ...p, last_name: e.target.value }))}/>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={lbl}>Email</label>
+                      <input type="email" className={inp} value={newCustomer.email}
+                        onChange={e => setNewCustomer(p => ({ ...p, email: e.target.value }))}/>
+                    </div>
+                    <div>
+                      <label className={lbl}>Phone</label>
+                      <input type="tel" className={inp} value={newCustomer.phone}
+                        onChange={e => setNewCustomer(p => ({ ...p, phone: e.target.value }))}/>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={lbl}>Address</label>
+                      <input type="text" className={inp} value={newCustomer.address_line1}
+                        onChange={e => setNewCustomer(p => ({ ...p, address_line1: e.target.value }))}/>
+                    </div>
+                    <div>
+                      <label className={lbl}>Postcode</label>
+                      <input type="text" className={inp} value={newCustomer.postcode}
+                        onChange={e => setNewCustomer(p => ({ ...p, postcode: e.target.value }))}/>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
 
-                    <div className="bg-gray-50 rounded-xl p-4">
-                      <div className="text-xs font-medium text-gray-700 mb-3">Current estimated annual energy costs (heating & hot water)</div>
-                      <div className="space-y-2 text-xs">
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Space heating</span>
-                          <span className="font-medium">£{heatLoss.current_heating_cost.toLocaleString()}/yr</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Hot water</span>
-                          <span className="font-medium">£{heatLoss.current_hotwater_cost.toLocaleString()}/yr</span>
-                        </div>
-                        <div className="flex justify-between pt-2 border-t border-gray-200 font-medium">
-                          <span className="text-gray-900">Total relevant spend</span>
-                          <span className="text-gray-900">£{heatLoss.current_relevant_cost.toLocaleString()}/yr</span>
-                        </div>
-                        <div className="flex justify-between pt-1">
-                          <span className="text-gray-500">Annual energy consumption</span>
-                          <span className="font-medium">{heatLoss.annual_kwh_heat.toLocaleString()} kWh/yr</span>
-                        </div>
-                      </div>
-                      <p className="text-xs text-gray-400 mt-3">Full running cost comparison completed at design stage once system is specified.</p>
+            {/* Job details */}
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4">
+              <div className="text-sm font-semibold text-white">Job details</div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className={lbl}>Trade</label>
+                  <select value={form.trade_type} onChange={e => upd({ trade_type: e.target.value as TradeType })} className={inp}>
+                    {TRADES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={lbl}>Site postcode</label>
+                  <input type="text" className={inp} value={form.site_postcode}
+                    onChange={e => upd({ site_postcode: e.target.value })} placeholder="B1 1AA"/>
+                </div>
+              </div>
+              <div>
+                <label className={lbl}>Site address</label>
+                <input type="text" className={inp} value={form.site_address_line1}
+                  onChange={e => upd({ site_address_line1: e.target.value })} placeholder="12 Trade Street"/>
+              </div>
+              {workType === 'job' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className={lbl}>Scheduled start</label>
+                    <input type="datetime-local" className={inp} value={form.scheduled_start}
+                      onChange={e => upd({ scheduled_start: e.target.value })}/>
+                  </div>
+                  <div>
+                    <label className={lbl}>Scheduled end</label>
+                    <input type="datetime-local" className={inp} value={form.scheduled_end}
+                      onChange={e => upd({ scheduled_end: e.target.value })}/>
+                  </div>
+                </div>
+              )}
+              <div>
+                <label className={lbl}>Notes for customer</label>
+                <textarea className={`${inp} resize-none`} rows={2} value={form.customer_notes}
+                  onChange={e => upd({ customer_notes: e.target.value })}
+                  placeholder="Visible on quote/invoice…"/>
+              </div>
+              <div>
+                <label className={lbl}>Internal notes</label>
+                <textarea className={`${inp} resize-none`} rows={2} value={form.internal_notes}
+                  onChange={e => upd({ internal_notes: e.target.value })}
+                  placeholder="Not shown to customer…"/>
+              </div>
+            </div>
+
+            {/* Line items */}
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-sm font-semibold text-white">Line items</div>
+                {catalogue.length > 0 && (
+                  <div className="relative group">
+                    <button className="text-xs text-amber-400 hover:text-amber-300">+ From catalogue</button>
+                    <div className="absolute right-0 top-6 bg-gray-800 border border-gray-700 rounded-xl p-2 min-w-56 z-10 hidden group-hover:block shadow-xl">
+                      <div className="text-xs text-gray-500 px-2 py-1 mb-1">Catalogue items</div>
+                      {catalogue.map(c => (
+                        <button key={c.id} onClick={() => addFromCatalogue(c)}
+                          className="w-full text-left px-2 py-2 rounded-lg hover:bg-gray-700 transition-colors">
+                          <div className="text-xs text-gray-200">{c.name}</div>
+                          <div className="text-xs text-gray-500">{formatCurrency(c.unit_price)} / {c.unit}</div>
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
-              </>
-            )}
-
-            {!selectedEpc && !epcLoading && !showEpcList && (
-              <div className="bg-white border border-gray-200 rounded-xl p-6">
-                <div className="text-sm font-medium text-gray-900 mb-1">No EPC data</div>
-                <div className="text-xs text-gray-500">Property and heat loss details will be collected during the site survey stage.</div>
               </div>
-            )}
 
-            <div className="flex justify-between pt-2">
-              <button onClick={() => setStep(1)} className="text-sm text-gray-400 hover:text-gray-600 transition-colors">← Back</button>
-              <button
-                onClick={() => { checkBusFromEpc(); setStep(3) }}
-                className="bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium px-6 py-2.5 rounded-lg transition-colors"
-              >
-                Next: BUS grant →
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* STEP 3 — BUS grant */}
-        {step === 3 && (
-          <div className="space-y-4">
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <div className="text-sm font-medium text-gray-900 mb-1">Boiler Upgrade Scheme (BUS)</div>
-              <div className="text-xs text-gray-500 mb-6">The BUS grant provides £7,500 towards the cost of an air-to-water heat pump installation, claimed on the customer&apos;s behalf.</div>
-
-              <div className={`rounded-xl p-4 mb-6 border ${busEligible ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
-                <div className="flex items-start gap-3">
-                  <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${busEligible ? 'bg-emerald-100' : 'bg-amber-100'}`}>
-                    {busEligible ? (
-                      <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
-                        <path d="M1 5l3.5 3.5 6.5-8" stroke="#065f46" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                      </svg>
-                    ) : (
-                      <svg width="4" height="10" viewBox="0 0 4 10" fill="none">
-                        <path d="M2 1v6M2 9v1" stroke="#92400e" strokeWidth="2" strokeLinecap="round"/>
-                      </svg>
-                    )}
-                  </div>
-                  <div>
-                    <div className={`text-sm font-medium ${busEligible ? 'text-emerald-900' : 'text-amber-900'}`}>
-                      {busEligible ? 'BUS eligible — £7,500 grant available' : 'BUS eligibility to confirm on site'}
+              <div className="space-y-3">
+                {lineItems.map((item, idx) => (
+                  <div key={item.id} className="bg-gray-800 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-600 w-4">{idx + 1}</span>
+                      <input type="text" placeholder="Item name *" value={item.name}
+                        onChange={e => updateItem(item.id, { name: e.target.value })}
+                        className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-amber-500"/>
+                      {lineItems.length > 1 && (
+                        <button onClick={() => removeItem(item.id)} className="text-gray-600 hover:text-red-400 text-lg leading-none">×</button>
+                      )}
                     </div>
-                    <div className={`text-xs mt-1 ${busEligible ? 'text-emerald-700' : 'text-amber-700'}`}>{busReason}</div>
+                    <input type="text" placeholder="Description (optional)" value={item.description}
+                      onChange={e => updateItem(item.id, { description: e.target.value })}
+                      className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-amber-500"/>
+                    <div className="grid grid-cols-5 gap-2">
+                      <div>
+                        <div className="text-xs text-gray-600 mb-1">Qty</div>
+                        <input type="number" min="0" step="0.01" value={item.quantity}
+                          onChange={e => updateItem(item.id, { quantity: parseFloat(e.target.value) || 0 })}
+                          className="w-full bg-gray-700 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-amber-500"/>
+                      </div>
+                      <div>
+                        <div className="text-xs text-gray-600 mb-1">Unit</div>
+                        <select value={item.unit} onChange={e => updateItem(item.id, { unit: e.target.value })}
+                          className="w-full bg-gray-700 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-amber-500">
+                          {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="text-xs text-gray-600 mb-1">Unit price</div>
+                        <input type="number" min="0" step="0.01" value={item.unit_price}
+                          onChange={e => updateItem(item.id, { unit_price: parseFloat(e.target.value) || 0 })}
+                          className="w-full bg-gray-700 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-amber-500"/>
+                      </div>
+                      <div>
+                        <div className="text-xs text-gray-600 mb-1">Cost price</div>
+                        <input type="number" min="0" step="0.01" value={item.cost_price}
+                          onChange={e => updateItem(item.id, { cost_price: parseFloat(e.target.value) || 0 })}
+                          className="w-full bg-gray-700 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-amber-500"/>
+                      </div>
+                      <div>
+                        <div className="text-xs text-gray-600 mb-1">VAT</div>
+                        <select value={item.vat_rate} onChange={e => updateItem(item.id, { vat_rate: e.target.value as VatRate })}
+                          className="w-full bg-gray-700 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-amber-500">
+                          <option value="standard">20%</option>
+                          <option value="reduced">5%</option>
+                          <option value="zero">0%</option>
+                          <option value="exempt">Exempt</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <label className="flex items-center gap-2 text-xs text-gray-500 cursor-pointer">
+                        <input type="checkbox" checked={item.is_material}
+                          onChange={e => updateItem(item.id, { is_material: e.target.checked })}
+                          className="rounded"/>
+                        Material (track ordering)
+                      </label>
+                      <div className="text-sm font-semibold text-amber-400">{formatCurrency(lineGross(item))}</div>
+                    </div>
                   </div>
-                </div>
+                ))}
               </div>
 
-              <div className="text-sm font-medium text-gray-900 mb-3">Will you be claiming the BUS grant for this customer?</div>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => setClaimBus(true)}
-                  className={`p-4 rounded-xl border-2 text-left transition-colors ${claimBus === true ? 'border-emerald-600 bg-emerald-50' : 'border-gray-200 hover:border-emerald-300'}`}
-                >
-                  <div className="text-sm font-medium text-gray-900 mb-1">Yes — claim BUS grant</div>
-                  <div className="text-xs text-gray-500">£7,500 deducted from customer invoice. Admin team notified to process the application.</div>
-                </button>
-                <button
-                  onClick={() => setClaimBus(false)}
-                  className={`p-4 rounded-xl border-2 text-left transition-colors ${claimBus === false ? 'border-gray-500 bg-gray-50' : 'border-gray-200 hover:border-gray-300'}`}
-                >
-                  <div className="text-sm font-medium text-gray-900 mb-1">No — proceed without BUS</div>
-                  <div className="text-xs text-gray-500">Continue without the BUS grant. This can be added later if circumstances change.</div>
-                </button>
-              </div>
-
-              {claimBus === true && (
-                <div className="mt-4 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
-                  <div className="text-xs font-medium text-blue-900 mb-1">What happens next</div>
-                  <div className="text-xs text-blue-800 space-y-1">
-                    <div>· Admin team will be notified and will begin the BUS application</div>
-                    <div>· Customer must own and live in the property</div>
-                    <div>· Property must have a valid EPC lodged within the last 10 years</div>
-                    <div>· Grant redeemed after installation and commissioning sign-off</div>
-                  </div>
-                </div>
-              )}
-              {claimBus === false && (
-                <div className="mt-4 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
-                  <div className="text-xs text-gray-600">Job will proceed without BUS funding. Full installation cost will be invoiced to the customer.</div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-between">
-              <button onClick={() => setStep(2)} className="text-sm text-gray-400 hover:text-gray-600 transition-colors">← Back</button>
-              <button
-                onClick={() => {
-                  if (claimBus === null) { setError('Please select a BUS option'); return }
-                  setError('')
-                  setStep(4)
-                }}
-                className="bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-medium px-6 py-2.5 rounded-lg transition-colors"
-              >
-                Next: Confirm →
-              </button>
-            </div>
-            {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
-          </div>
-        )}
-
-        {/* STEP 4 — Confirm */}
-        {step === 4 && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <h2 className="text-sm font-medium text-gray-900 mb-5">Confirm & create job</h2>
-            <div className="space-y-4 mb-6">
-              <div className="bg-gray-50 rounded-xl p-4">
-                <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Customer</div>
-                <div className="text-sm font-medium text-gray-900">{customer.first_name} {customer.last_name}</div>
-                <div className="text-xs text-gray-500 mt-0.5">{customer.address_line1}, {customer.city}, {customer.postcode}</div>
-                <div className="text-xs text-gray-500 mt-0.5">{customer.phone}{customer.email ? ` · ${customer.email}` : ''}</div>
-              </div>
-
-              {selectedEpc && (
-                <div className="bg-gray-50 rounded-xl p-4">
-                  <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Property details</div>
-                  <div className="grid grid-cols-2 gap-2 text-xs mb-3">
-                    <div><span className="text-gray-500">Type: </span><span className="text-gray-900 font-medium">{selectedEpc.property_type}</span></div>
-                    <div><span className="text-gray-500">Built: </span><span className="text-gray-900 font-medium">{selectedEpc.construction_age_band}</span></div>
-                    <div><span className="text-gray-500">Area: </span><span className="text-gray-900 font-medium">{selectedEpc.total_floor_area}m²</span></div>
-                    <div><span className="text-gray-500">EPC: </span><span className="text-gray-900 font-medium">{selectedEpc.current_energy_rating}</span></div>
-                    <div className="col-span-2"><span className="text-gray-500">Heating: </span><span className="text-gray-900 font-medium">{selectedEpc.mainheat_description}</span></div>
-                    <div className="col-span-2"><span className="text-gray-500">Walls: </span><span className="text-gray-900 font-medium">{selectedEpc.walls_description}</span></div>
-                  </div>
-                  <div className="border-t border-gray-200 pt-3">
-                    <div className="text-xs text-gray-500 mb-1">EPC Certificate Number</div>
-                    <div className="text-xs font-mono text-gray-800 font-medium tracking-wider">{formatEpcCertNumber(selectedEpc.lmk_key)}</div>
-                  </div>
-                </div>
-              )}
-
-              {heatLoss && (
-                <div className="bg-gray-50 rounded-xl p-4">
-                  <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Heat loss estimate</div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div><span className="text-gray-500">Design load: </span><span className="text-gray-900 font-medium">{(heatLoss.design_load_w / 1000).toFixed(1)} kW</span></div>
-                    <div><span className="text-gray-500">Recommended: </span><span className="text-emerald-700 font-medium">{heatLoss.recommended_kw} kW ASHP</span></div>
-                    <div><span className="text-gray-500">Heating + HW: </span><span className="text-gray-900 font-medium">£{heatLoss.current_relevant_cost}/yr</span></div>
-                    <div><span className="text-gray-500">Annual usage: </span><span className="text-gray-900 font-medium">{heatLoss.annual_kwh_heat.toLocaleString()} kWh</span></div>
-                  </div>
-                </div>
-              )}
-
-              <div className={`rounded-xl p-4 ${claimBus ? 'bg-emerald-50' : 'bg-gray-50'}`}>
-                <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">BUS grant</div>
-                <div className={`text-sm font-medium ${claimBus ? 'text-emerald-800' : 'text-gray-700'}`}>
-                  {claimBus ? '£7,500 grant — admin team will be notified' : 'Not claiming BUS grant'}
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 mb-5">
-              <div className="text-xs text-blue-800">
-                Creating this job will initialise all 10 workflow stages and generate the MCS document package. The survey stage will be unlocked first.
-              </div>
-            </div>
-
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg px-3 py-2.5 mb-4">{error}</div>
-            )}
-
-            <div className="flex justify-between">
-              <button onClick={() => setStep(3)} className="text-sm text-gray-400 hover:text-gray-600 transition-colors">← Back</button>
-              <button
-                onClick={createJob}
-                disabled={saving}
-                className="bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-medium px-6 py-2.5 rounded-lg transition-colors"
-              >
-                {saving ? 'Creating job...' : 'Create job →'}
+              <button onClick={addItem}
+                className="mt-3 w-full py-2.5 border border-dashed border-gray-700 rounded-xl text-xs text-gray-500 hover:border-amber-500 hover:text-amber-400 transition-colors">
+                + Add line item
               </button>
             </div>
           </div>
-        )}
+
+          {/* RIGHT: Summary */}
+          <div className="space-y-4">
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 sticky top-20">
+              <div className="text-sm font-semibold text-white mb-4">Summary</div>
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-500">Subtotal (net)</span>
+                  <span className="text-gray-200">{formatCurrency(subtotalNet)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-500">VAT</span>
+                  <span className="text-gray-200">{formatCurrency(totalVat)}</span>
+                </div>
+                <div className="border-t border-gray-700 pt-2 flex justify-between">
+                  <span className="text-sm font-semibold text-white">Total</span>
+                  <span className="text-lg font-bold text-amber-400">{formatCurrency(totalGross)}</span>
+                </div>
+              </div>
+
+              {totalCost > 0 && (
+                <div className="mt-4 pt-4 border-t border-gray-800 space-y-2">
+                  <div className="text-xs text-gray-600 uppercase tracking-wide">Margin</div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Cost</span>
+                    <span className="text-gray-400">{formatCurrency(totalCost)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Gross profit</span>
+                    <span className="text-emerald-400">{formatCurrency(subtotalNet - totalCost)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Margin</span>
+                    <span className={`font-semibold ${margin < 20 ? 'text-red-400' : margin < 40 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                      {margin.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <button onClick={handleSave} disabled={saving}
+                className="mt-5 w-full bg-amber-500 hover:bg-amber-400 disabled:bg-gray-700 disabled:text-gray-500 text-gray-950 font-bold py-3 rounded-xl transition-colors capitalize">
+                {saving ? 'Saving…' : `Create ${workType}`}
+              </button>
+
+              {error && (
+                <div className="mt-3 text-xs text-red-400 text-center">{error}</div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
+  )
+}
+
+export default function NewWorkPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-950 flex items-center justify-center"><div className="text-sm text-gray-600">Loading…</div></div>}>
+      <NewWorkInner />
+    </Suspense>
   )
 }

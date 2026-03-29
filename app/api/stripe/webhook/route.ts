@@ -3,10 +3,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import Stripe from 'stripe'
 import { createClient } from '@supabase/supabase-js'
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2024-12-18.acacia',
-})
-
 // Service role needed here - webhook has no user session
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -58,7 +54,7 @@ export async function POST(req: NextRequest) {
         : sub.status === 'canceled' ? 'cancelled'
         : 'active'
 
-      const plan = sub.metadata?.plan || 'basic'
+      const plan = sub.metadata?.plan || 'solo'
 
       await db.from('accounts').update({
         status, plan,
