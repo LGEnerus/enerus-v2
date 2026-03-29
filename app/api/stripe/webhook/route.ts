@@ -10,6 +10,10 @@ const supabase = createClient(
 )
 
 export async function POST(req: NextRequest) {
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
+    apiVersion: '2026-03-25.dahlia',
+  })
+
   const body = await req.text()
   const sig = req.headers.get('stripe-signature')!
 
@@ -29,7 +33,7 @@ export async function POST(req: NextRequest) {
   switch (event.type) {
 
     case 'checkout.session.completed': {
-      const session = event.data.object as Stripe.CheckoutSession
+      const session = event.data.object as Stripe.Checkout.Session
       const accountId = session.metadata?.account_id
       const plan = session.metadata?.plan
       if (!accountId) break
@@ -37,8 +41,8 @@ export async function POST(req: NextRequest) {
       await db.from('accounts').update({
         plan: plan || 'basic',
         status: 'active',
-        stripe_customer_id: session.customer,
-        stripe_subscription_id: session.subscription,
+        stripe_customer_id: session.customer as string,
+        stripe_subscription_id: session.subscription as string,
         updated_at: new Date().toISOString(),
       }).eq('id', accountId)
       break
