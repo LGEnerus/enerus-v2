@@ -24,33 +24,30 @@ export default function LoginPage() {
     }
 
     if (data.session) {
+      // Small delay to ensure session is stored before navigation
+      await new Promise(r => setTimeout(r, 100))
+
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data: userData, error: userError } = await (supabase as any)
+        const { data: userData } = await (supabase as any)
           .from('users')
           .select('role, account_id')
           .eq('id', data.user.id)
           .single()
 
-        if (userError || !userData) {
-          // Schema cache issue or new user - check if they have a session
-          // and route to dashboard optimistically, onboarding will catch them
-          // if account setup is incomplete
-          window.location.replace('/dashboard')
-          return
-        }
-
-        if (!userData.account_id) {
-          window.location.replace('/onboarding')
+        if (!userData?.account_id) {
+          window.location.href = '/onboarding'
         } else if (userData.role === 'admin') {
-          window.location.replace('/admin')
+          window.location.href = '/admin'
         } else {
-          window.location.replace('/dashboard')
+          window.location.href = '/dashboard'
         }
       } catch {
-        // If user lookup fails, go to dashboard — middleware will redirect if needed
-        window.location.replace('/dashboard')
+        window.location.href = '/dashboard'
       }
+    } else {
+      setError('Sign in failed — please try again')
+      setLoading(false)
     }
   }
 
@@ -63,7 +60,7 @@ export default function LoginPage() {
 <div className="flex items-center justify-center mb-10">
   <svg viewBox="0 0 200 46" width="200" height="46" xmlns="http://www.w3.org/2000/svg">
     <text x="0" y="34" fontFamily="system-ui, -apple-system, sans-serif" fontSize="34" fontWeight="800" fill="#9ca3af" letterSpacing="-0.5">trade stack</text>
-    <text x="124" y="44" fontFamily="system-ui, -apple-system, sans-serif" fontSize="11" fontWeight="400" fill="#4b5563" letterSpacing="0.2">by enerus</text>
+    <text x="198" y="44" textAnchor="end" fontFamily="system-ui, -apple-system, sans-serif" fontSize="11" fontWeight="400" fill="#4b5563" letterSpacing="0.3">by enerus</text>
   </svg>
 </div>
 
