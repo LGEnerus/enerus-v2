@@ -30,36 +30,48 @@ export async function middleware(req: NextRequest) {
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: user } = await (supabase as any)
+    const { data: user, error: userError } = await (supabase as any)
       .from('users')
-      .select('account_id, accounts(status, trial_ends_at)')
+      .select('account_id')
       .eq('id', session.user.id)
       .single()
 
-    if (!user?.account_id) {
+    // If query fails, let through — don't block on DB errors
+    if (userError || !user) return res
+
+    if (!user.account_id) {
       return NextResponse.redirect(new URL('/onboarding', req.url))
     }
 
-    const account = user.accounts
-    if (account) {
-      const { status, trial_ends_at } = account
-      const isSettings = pathname.startsWith('/settings')
-      const isPricing = pathname.startsWith('/pricing')
+    // Check account status separately to avoid join issues
+    const { data: account, error: accError } = await (supabase as any)
+      .from('accounts')
+      .select('status, trial_ends_at')
+      .eq('id', user.account_id)
+      .single()
 
-      // Trial expired
-      if (status === 'trial' && trial_ends_at && new Date(trial_ends_at) < new Date()) {
-        if (!isSettings && !isPricing) {
-          return NextResponse.redirect(new URL('/pricing', req.url))
-        }
-      }
+    // If account query fails, let through
+    if (accError || !account) return res
 
-      // Cancelled or past due
-      if ((status === 'cancelled' || status === 'past_due') && !isSettings && !isPricing) {
+    const { status, trial_ends_at } = account
+    const isSettings = pathname.startsWith('/settings')
+    const isPricing = pathname.startsWith('/pricing')
+
+    // Trial expired
+    if (status === 'trial' && trial_ends_at && new Date(trial_ends_at) < new Date()) {
+      if (!isSettings && !isPricing) {
         return NextResponse.redirect(new URL('/pricing', req.url))
       }
     }
+
+    // Cancelled or past due
+    if ((status === 'cancelled' || status === 'past_due') && !isSettings && !isPricing) {
+      return NextResponse.redirect(new URL('/pricing', req.url))
+    }
+
   } catch {
-    // DB errors should not block users
+    // Any unexpected error — let through, don't block
+    return res
   }
 
   return res
