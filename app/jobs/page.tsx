@@ -3,228 +3,156 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useEffect, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useRouter } from 'next/navigation'
+import { supabase, formatDate } from '@/lib/supabase'
 
-const STAGE_LABELS: Record<string, string> = {
-  customer: 'Customer',
-  survey: 'Survey',
-  design: 'Design',
-  proposal: 'Proposal',
-  acceptance: 'Acceptance',
-  bus_application: 'BUS Application',
-  materials: 'Materials',
-  installation: 'Installation',
-  commissioning: 'Commissioning',
-  handover: 'Handover',
+const STATUS_CONFIG: Record<string, { label: string; colour: string }> = {
+  created:     { label: 'Created',     colour: 'text-gray-400 bg-gray-800' },
+  assigned:    { label: 'Assigned',    colour: 'text-purple-300 bg-purple-900/50' },
+  scheduled:   { label: 'Scheduled',   colour: 'text-blue-300 bg-blue-900/50' },
+  in_progress: { label: 'In progress', colour: 'text-amber-300 bg-amber-900/50' },
+  on_hold:     { label: 'On hold',     colour: 'text-orange-300 bg-orange-900/30' },
+  complete:    { label: 'Complete',    colour: 'text-emerald-300 bg-emerald-900/50' },
+  cancelled:   { label: 'Cancelled',   colour: 'text-gray-600 bg-gray-800' },
 }
 
-const STAGE_ORDER = [
-  'customer', 'survey', 'design', 'proposal', 'acceptance',
-  'bus_application', 'materials', 'installation', 'commissioning', 'handover'
-]
+const FILTERS = ['all', 'created', 'assigned', 'scheduled', 'in_progress', 'on_hold', 'complete', 'cancelled'] as const
+type Filter = typeof FILTERS[number]
 
-const BUS_LABELS: Record<string, string> = {
-  not_started: 'Not claiming',
-  eligible: 'Eligible',
-  submitted: 'Submitted',
-  approved: 'Approved',
-  rejected: 'Rejected',
-  redeemed: 'Redeemed',
-}
-
-export default function JobsPage() {
+export default function JobsListPage() {
+  const router = useRouter()
   const [jobs, setJobs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [filter, setFilter] = useState<Filter>('all')
+  const [search, setSearch] = useState('')
 
-  useEffect(() => {
-    async function load() {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { window.location.replace('/login'); return }
+  useEffect(() => { load() }, [])
 
-      const { data: profile } = await (supabase as any)
-        .from('installer_profiles')
-        .select('id')
-        .eq('user_id', session.user.id)
-        .single()
+  async function load() {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) { router.push('/login'); return }
+    const { data } = await (supabase as any)
+      .from('jobs')
+      .select('*, customers(first_name, last_name, company_name, is_company), invoices(id, status, total_gross, invoice_type)')
+      .order('created_at', { ascending: false })
+    setJobs(data || [])
+    setLoading(false)
+  }
 
-      if (!profile) { setLoading(false); return }
+  function customerName(j: any) {
+    const c = j.customers
+    if (!c) return '—'
+    if (c.is_company && c.company_name) return c.company_name
+    return `${c.first_name} ${c.last_name}`
+  }
 
-      const { data } = await (supabase as any)
-        .from('jobs')
-        .select(`
-          id, reference, current_stage, bus_status, created_at,
-          customers (first_name, last_name, address_line1, city, postcode, epc_rating),
-          job_stages (stage, status)
-        `)
-        .eq('installer_id', profile.id)
-        .order('created_at', { ascending: false })
-
-      setJobs(data || [])
-      setLoading(false)
+  const filtered = jobs.filter(j => {
+    if (filter !== 'all' && j.status !== filter) return false
+    if (search) {
+      const s = `${customerName(j)} ${j.reference || ''} ${j.title || ''}`.toLowerCase()
+      if (!s.includes(search.toLowerCase())) return false
     }
-    load()
-  }, [])
+    return true
+  })
 
-  function getStageProgress(jobStages: any[]) {
-    if (!jobStages) return 0
-    const done = jobStages.filter((s: any) => s.status === 'complete').length
-    return Math.round((done / 10) * 100)
+  const counts: Record<Filter, number> = {
+    all: jobs.length,
+    created: jobs.filter(j => j.status === 'created').length,
+    assigned: jobs.filter(j => j.status === 'assigned').length,
+    scheduled: jobs.filter(j => j.status === 'scheduled').length,
+    in_progress: jobs.filter(j => j.status === 'in_progress').length,
+    on_hold: jobs.filter(j => j.status === 'on_hold').length,
+    complete: jobs.filter(j => j.status === 'complete').length,
+    cancelled: jobs.filter(j => j.status === 'cancelled').length,
   }
 
-  function getStagePill(stage: string) {
-    const colors: Record<string, string> = {
-      customer: 'bg-gray-100 text-gray-600',
-      survey: 'bg-blue-50 text-blue-700',
-      design: 'bg-blue-50 text-blue-700',
-      proposal: 'bg-purple-50 text-purple-700',
-      acceptance: 'bg-purple-50 text-purple-700',
-      bus_application: 'bg-amber-50 text-amber-700',
-      materials: 'bg-amber-50 text-amber-700',
-      installation: 'bg-orange-50 text-orange-700',
-      commissioning: 'bg-emerald-50 text-emerald-700',
-      handover: 'bg-emerald-100 text-emerald-800',
-    }
-    return colors[stage] || 'bg-gray-100 text-gray-600'
-  }
+  const activeCount = jobs.filter(j => ['created','assigned','scheduled','in_progress'].includes(j.status)).length
 
-  function getBusPill(status: string) {
-    const colors: Record<string, string> = {
-      not_started: 'bg-gray-100 text-gray-500',
-      eligible: 'bg-emerald-50 text-emerald-700',
-      submitted: 'bg-amber-50 text-amber-700',
-      approved: 'bg-emerald-100 text-emerald-800',
-      rejected: 'bg-red-50 text-red-700',
-      redeemed: 'bg-emerald-200 text-emerald-900',
-    }
-    return colors[status] || 'bg-gray-100 text-gray-500'
-  }
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-sm text-gray-400">Loading jobs...</p>
-      </div>
-    )
-  }
+  if (loading) return <div className="min-h-screen bg-gray-950 flex items-center justify-center"><div className="text-sm text-gray-600">Loading…</div></div>
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-emerald-700 rounded-lg flex items-center justify-center">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="white">
-              <path d="M8 1L2 4v4c0 3.3 2.5 6.3 6 7 3.5-.7 6-3.7 6-7V4L8 1z" />
-            </svg>
-          </div>
-          <div>
-            <div className="text-sm font-semibold text-gray-900">Enerus Plus</div>
-            <div className="text-xs text-gray-400 uppercase tracking-wide">MCS Umbrella</div>
-          </div>
-        </div>
+    <div className="min-h-screen bg-gray-950 flex flex-col">
+      <div className="bg-gray-900 border-b border-gray-800 px-6 h-14 flex items-center justify-between sticky top-0 z-20 flex-shrink-0">
         <div className="flex items-center gap-4">
-          <a href="/dashboard" className="text-xs text-gray-400 hover:text-gray-600 transition-colors">← Dashboard</a>
-          <a href="/jobs/new" className="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium px-4 py-2 rounded-lg transition-colors">
-            New customer
-          </a>
+          <h1 className="text-sm font-semibold text-white">Jobs</h1>
+          <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1 overflow-x-auto">
+            {(['all','created','assigned','scheduled','in_progress','on_hold','complete'] as Filter[]).map(f => (
+              <button key={f} onClick={() => setFilter(f)}
+                className={`text-xs px-3 py-1.5 rounded-md transition-colors font-medium whitespace-nowrap ${filter === f ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+                {f === 'in_progress' ? 'In progress' : f === 'on_hold' ? 'On hold' : f.charAt(0).toUpperCase() + f.slice(1)}
+                {counts[f] > 0 && <span className={`ml-1 ${filter === f ? 'text-amber-400' : 'text-gray-600'}`}>{counts[f]}</span>}
+              </button>
+            ))}
+          </div>
         </div>
+        <a href="/jobs/new" className="bg-amber-500 hover:bg-amber-400 text-gray-950 text-xs font-bold px-4 py-2 rounded-lg">+ New job</a>
       </div>
 
-      <div className="max-w-5xl mx-auto px-6 py-8">
-
-        {/* Metrics */}
-        <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="flex-1 px-6 py-5 space-y-4">
+        {/* Summary */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: 'Total jobs', value: jobs.length },
-            { label: 'In progress', value: jobs.filter(j => j.current_stage !== 'handover').length },
-            { label: 'BUS claimed', value: jobs.filter(j => ['eligible','submitted','approved','redeemed'].includes(j.bus_status)).length },
-            { label: 'Completed', value: jobs.filter(j => j.current_stage === 'handover').length },
+            { label: 'Active', value: activeCount, sub: 'In progress + scheduled', colour: 'text-amber-400' },
+            { label: 'Scheduled', value: counts.scheduled, sub: 'Booked in', colour: 'text-blue-400' },
+            { label: 'In progress', value: counts.in_progress, sub: 'On site now', colour: 'text-amber-300' },
+            { label: 'Complete', value: counts.complete, sub: 'This month', colour: 'text-emerald-400' },
           ].map(m => (
-            <div key={m.label} className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">{m.label}</div>
-              <div className="text-2xl font-semibold text-gray-900">{m.value}</div>
+            <div key={m.label} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+              <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">{m.label}</div>
+              <div className={`text-2xl font-bold ${m.colour}`}>{m.value}</div>
+              <div className="text-xs text-gray-500 mt-1">{m.sub}</div>
             </div>
           ))}
         </div>
 
-        {/* Jobs table */}
-        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-            <div className="text-sm font-medium text-gray-900">All jobs</div>
-            <div className="text-xs text-gray-400">{jobs.length} total</div>
-          </div>
+        {/* Search */}
+        <div className="relative max-w-sm">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clipRule="evenodd"/></svg>
+          <input placeholder="Search customer or reference…" value={search} onChange={e => setSearch(e.target.value)}
+            className="w-full bg-gray-900 border border-gray-800 rounded-xl pl-10 pr-4 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-amber-500"/>
+        </div>
 
-          {jobs.length === 0 ? (
-            <div className="text-center py-16 text-sm text-gray-400">
-              No jobs yet.{' '}
-              <a href="/jobs/new" className="text-emerald-700 hover:underline">Create your first job →</a>
+        {/* List */}
+        <div className="space-y-2">
+          {filtered.length === 0 ? (
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl py-20 text-center">
+              <div className="text-3xl mb-3 opacity-20">🔧</div>
+              <div className="text-sm text-gray-600 mb-1">{search || filter !== 'all' ? 'No results' : 'No jobs yet'}</div>
+              {!search && filter === 'all' && <a href="/jobs/new" className="mt-4 inline-block text-xs bg-amber-500 text-gray-950 font-bold px-4 py-2 rounded-xl hover:bg-amber-400">Create your first job →</a>}
             </div>
-          ) : (
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wide px-6 py-3">Ref</th>
-                  <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wide px-4 py-3">Customer</th>
-                  <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wide px-4 py-3">Location</th>
-                  <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wide px-4 py-3">Stage</th>
-                  <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wide px-4 py-3">Progress</th>
-                  <th className="text-left text-xs font-medium text-gray-400 uppercase tracking-wide px-4 py-3">BUS</th>
-                  <th className="px-4 py-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job: any) => (
-                  <tr key={job.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
-                    <td className="px-6 py-4">
-                      <span className="text-xs font-mono text-gray-500">{job.reference || '—'}</span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="text-sm font-medium text-gray-900">
-                        {job.customers?.first_name} {job.customers?.last_name}
-                      </div>
-                      {job.customers?.epc_rating && (
-                        <span className="text-xs text-gray-400">EPC {job.customers.epc_rating}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="text-xs text-gray-600">{job.customers?.city}</div>
-                      <div className="text-xs text-gray-400">{job.customers?.postcode}</div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${getStagePill(job.current_stage)}`}>
-                        {STAGE_LABELS[job.current_stage] || job.current_stage}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="w-24">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs text-gray-400">{getStageProgress(job.job_stages)}%</span>
-                        </div>
-                        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-emerald-500 rounded-full transition-all"
-                            style={{ width: `${getStageProgress(job.job_stages)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${getBusPill(job.bus_status)}`}>
-                        {BUS_LABELS[job.bus_status] || job.bus_status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <a
-                        href={`/jobs/${job.id}`}
-                        className="text-xs text-emerald-700 hover:underline font-medium"
-                      >
-                        Open →
-                      </a>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          ) : filtered.map(j => {
+            const invs = j.invoices || []
+            const totalInvoiced = invs.reduce((s: number, i: any) => s + (i.total_gross || 0), 0)
+            const totalPaid = invs.filter((i: any) => i.status === 'paid').reduce((s: number, i: any) => s + (i.total_gross || 0), 0)
+            return (
+              <div key={j.id} onClick={() => router.push(`/jobs/${j.id}`)}
+                className="bg-gray-900 border border-gray-800 hover:border-gray-700 rounded-2xl px-5 py-4 cursor-pointer transition-colors group flex items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3 mb-1">
+                    <div className="text-sm font-semibold text-gray-200 group-hover:text-white truncate">{j.title || j.reference || '—'}</div>
+                    <span className={`text-xs px-2.5 py-1 rounded-full font-medium flex-shrink-0 ${STATUS_CONFIG[j.status]?.colour || 'text-gray-500 bg-gray-800'}`}>{STATUS_CONFIG[j.status]?.label || j.status}</span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-gray-500">
+                    <span>{customerName(j)}</span>
+                    <span className="font-mono">{j.reference}</span>
+                    {j.scheduled_start && <span>📅 {new Date(j.scheduled_start).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}</span>}
+                    {j.quote_id && <span className="text-blue-400">From quote</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 flex-shrink-0 text-right">
+                  {invs.length > 0 ? (
+                    <div>
+                      <div className="text-xs text-gray-500">{invs.length} invoice{invs.length !== 1 ? 's' : ''}</div>
+                      {totalInvoiced > 0 && <div className="text-xs text-emerald-400">{totalPaid > 0 ? `£${totalPaid.toFixed(0)} paid` : `£${totalInvoiced.toFixed(0)} invoiced`}</div>}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-700">No invoices</div>
+                  )}
+                  <svg className="w-4 h-4 text-gray-700 group-hover:text-gray-400 transition-colors" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd"/></svg>
+                </div>
+              </div>
+            )
+          })}
         </div>
       </div>
     </div>
